@@ -41,9 +41,10 @@ public struct RomajiConverter {
                 let nextIndex = kana.index(after: index)
                 if nextIndex < kana.endIndex {
                     let nextChar = String(kana[nextIndex])
-                    if let nextRomaji = kanaToRomaji[nextChar], !nextRomaji.isEmpty {
+                    if let nextRomaji = kanaToRomaji[nextChar],
+                       let firstChar = nextRomaji.first {
                         // Double the first consonant
-                        result += String(nextRomaji.first!)
+                        result += String(firstChar)
                     }
                 }
             } else {

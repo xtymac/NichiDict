@@ -1,0 +1,25 @@
+============================================================
+JMdict Multilingual Import
+============================================================
+Source: JMdict_e
+Target: dictionary_test_multilingual.sqlite
+Limit: 1000 entries
+
+Creating database: dictionary_test_multilingual.sqlite
+Parsing XML: JMdict_e
+Imported 1000 entries, 1730 senses (CN-simp: 0, CN-trad: 0)...
+
+=== Import Complete ===
+Total entries: 1,000
+Total senses: 1,730
+Senses with Chinese (Simplified): 0
+Senses with Chinese (Traditional): 0
+
+=== Database Statistics ===
+Dictionary entries: 1,000
+Word senses: 1,730
+FTS index: 1,000
+Entries with Simplified Chinese: 0 (0.00%)
+Entries with Traditional Chinese: 0 (0.00%)
+
+✅ Import completed successfully!

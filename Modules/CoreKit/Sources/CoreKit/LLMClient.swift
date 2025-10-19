@@ -8,18 +8,151 @@
 import Foundation
 import CryptoKit
 
-// MARK: - 公共模型：AI 返回结构（固定 JSON 格式）
-public struct LLMKeywordEntry: Codable, Hashable {
-    public let term: String        // 詞彙
-    public let reading: String     // 假名
-    public let glossZH: String     // 中文解釋
+// MARK: - 公共模型：AI 返回结构（词典格式）
+public struct LLMDictEntry: Codable, Hashable {
+    public let headword: String           // 見出し語（日语词条）
+    public let reading: String            // 読み（假名）
+    public let romaji: String?            // ローマ字（Hepburn）
+    public let partOfSpeech: String       // 品詞（動詞・名詞・形容動詞 等）
+    public let accent: String?            // アクセント（音调）
+    public let senses: [LLMSense]         // 義項（最多3条）
+    public let grammar: LLMGrammar?       // 文法・用法
+    public let examples: [LLMExample]?    // 用例（可选）
+    public let related: LLMRelated?       // 関連語
+
+    public init(headword: String, reading: String, romaji: String?, partOfSpeech: String,
+                accent: String?, senses: [LLMSense], grammar: LLMGrammar?,
+                examples: [LLMExample]?, related: LLMRelated?) {
+        self.headword = headword
+        self.reading = reading
+        self.romaji = romaji
+        self.partOfSpeech = partOfSpeech
+        self.accent = accent
+        self.senses = senses
+        self.grammar = grammar
+        self.examples = examples
+        self.related = related
+    }
+}
+
+public struct LLMSense: Codable, Hashable {
+    public let definition: String    // 日语释义
+    public let chinese: String       // 中文译文
+    public let english: String       // 英文译文
+
+    public init(definition: String, chinese: String, english: String) {
+        self.definition = definition
+        self.chinese = chinese
+        self.english = english
+    }
+}
+
+public struct LLMGrammar: Codable, Hashable {
+    public let conjugation: [String]?  // 活用形式
+    public let collocation: [String]?  // 常见搭配
+    public let honorific: String?      // 敬语形式
+
+    public init(conjugation: [String]?, collocation: [String]?, honorific: String?) {
+        self.conjugation = conjugation
+        self.collocation = collocation
+        self.honorific = honorific
+    }
+}
+
+public struct LLMRelated: Codable, Hashable {
+    public let synonym: String?    // 类义词
+    public let antonym: String?    // 反义词
+    public let derived: String?    // 派生词
+
+    public init(synonym: String?, antonym: String?, derived: String?) {
+        self.synonym = synonym
+        self.antonym = antonym
+        self.derived = derived
+    }
+}
+
+public struct LLMExample: Codable, Hashable {
+    public let japanese: String    // 日语例句
+    public let chinese: String     // 中文翻译
+    public let english: String     // 英文翻译
+
+    public init(japanese: String, chinese: String, english: String) {
+        self.japanese = japanese
+        self.chinese = chinese
+        self.english = english
+    }
+}
+
+// 查询结果类型
+public enum LLMQueryType: String, Codable {
+    case word           // 单词查询
+    case sentence       // 句子解析
+    case notFound       // 未收录
 }
 
 public struct LLMResult: Codable, Hashable {
-    public let direct: String      // 直譯
-    public let natural: String     // 更自然的譯文
-    public let points: [String]    // 語法要點（≤4條）
-    public let keywords: [LLMKeywordEntry]
+    public let queryType: LLMQueryType        // 查询类型
+    public let entries: [LLMDictEntry]        // 词条（最多top_k个）
+    public let sentenceAnalysis: LLMSentenceAnalysis?  // 句子解析（仅句子查询）
+
+    public init(queryType: LLMQueryType, entries: [LLMDictEntry], sentenceAnalysis: LLMSentenceAnalysis?) {
+        self.queryType = queryType
+        self.entries = entries
+        self.sentenceAnalysis = sentenceAnalysis
+    }
+}
+
+public struct LLMSentenceAnalysis: Codable, Hashable {
+    public let original: String                    // 原句
+    public let translation: LLMTranslation         // 翻译（中英）
+    public let wordBreakdown: [LLMWordBreakdown]   // 逐词解析
+    public let grammarPoints: [LLMGrammarPoint]    // 语法点
+
+    public init(original: String, translation: LLMTranslation,
+                wordBreakdown: [LLMWordBreakdown], grammarPoints: [LLMGrammarPoint]) {
+        self.original = original
+        self.translation = translation
+        self.wordBreakdown = wordBreakdown
+        self.grammarPoints = grammarPoints
+    }
+}
+
+public struct LLMTranslation: Codable, Hashable {
+    public let chinese: String    // 中文翻译
+    public let english: String    // 英文翻译
+
+    public init(chinese: String, english: String) {
+        self.chinese = chinese
+        self.english = english
+    }
+}
+
+public struct LLMWordBreakdown: Codable, Hashable {
+    public let word: String            // 词
+    public let reading: String         // 读音
+    public let meaning: String         // 词义
+    public let grammaticalRole: String // 语法作用
+
+    public init(word: String, reading: String, meaning: String, grammaticalRole: String) {
+        self.word = word
+        self.reading = reading
+        self.meaning = meaning
+        self.grammaticalRole = grammaticalRole
+    }
+}
+
+public struct LLMGrammarPoint: Codable, Hashable {
+    public let pattern: String         // 文法模式
+    public let reading: String         // 读音
+    public let meaning: String         // 含义
+    public let explanation: String     // 详细说明
+
+    public init(pattern: String, reading: String, meaning: String, explanation: String) {
+        self.pattern = pattern
+        self.reading = reading
+        self.meaning = meaning
+        self.explanation = explanation
+    }
 }
 
 // MARK: - Provider 定義
@@ -121,19 +254,213 @@ public final class LLMClient {
 
     // MARK: Prompt
     private func buildPrompt(sentence: String, locale: String) -> String {
-        """
-        你是日語老師。請用簡短\(locale == "zh" ? "中文" : locale)輸出固定 JSON（不要多餘文字）。
-        JSON 結構：
+        // Note: locale parameter available for future use if needed for localized prompts
+        _ = locale
+
+        return """
+        You are a professional Japanese dictionary system. Map user input (Chinese/English/Japanese) to the most appropriate Japanese dictionary entries.
+
+        CRITICAL: You MUST return valid JSON that EXACTLY matches the schema below. Do not add any text before or after the JSON.
+
+        ## Step 1: Determine Query Type
+        - If input contains periods/question marks/exclamation marks OR has many spaces OR length>12 with multiple word forms → queryType: "sentence"
+        - Otherwise → queryType: "word"
+        - If cannot identify → queryType: "notFound"
+
+        ## Step 2: Response Rules
+        - Primary language: Japanese definitions
+        - Provide short Chinese (Simplified) and English translations
+        - No redundancy: merge same meanings/POS/definitions
+        - Max 3 senses per entry, 2-3 examples
+        - Use「(推定)」for uncertain information
+        - For Chinese/English input (e.g., "noon", "eat"), map to Japanese entries (e.g., 「正午」「昼」「食べる」「食う」)
+
+        ## Step 3: JSON Schema - Word Mode (MUST FOLLOW EXACTLY)
         {
-          "direct": "直譯（簡短）",
-          "natural": "更自然的譯文（簡短）",
-          "points": ["要點1","要點2","要點3","要點4(可省)"],
-          "keywords": [
-            {"term":"詞彙","reading":"かな","glossZH":"中文解釋"}
+          "queryType": "word",
+          "entries": [
+            {
+              "headword": "食べる",
+              "reading": "たべる",
+              "romaji": "taberu",
+              "partOfSpeech": "一段動詞・他動",
+              "accent": "たべ↘る［1］",
+              "senses": [
+                {
+                  "definition": "口に入れて噛み、飲み込む",
+                  "chinese": "吃；进食",
+                  "english": "to eat"
+                },
+                {
+                  "definition": "資源や時間を大量に消費する",
+                  "chinese": "耗费",
+                  "english": "to consume"
+                }
+              ],
+              "grammar": {
+                "conjugation": ["食べます", "食べない", "食べた", "食べて"],
+                "collocation": ["を食べる", "外で食べる", "偏食をする"],
+                "honorific": "召し上がる（尊敬）、いただく（謙譲）"
+              },
+              "examples": [
+                {
+                  "japanese": "朝ごはんを食べる。",
+                  "chinese": "我吃早饭。",
+                  "english": "I eat breakfast."
+                }
+              ],
+              "related": {
+                "synonym": "喫する（書）／いただく（謙）",
+                "antonym": "断食する",
+                "derived": null
+              }
+            }
           ]
         }
-        請特別注意：points 不超過 4 條；關鍵詞按「詞彙（假名）『中文解釋』」含義輸出到 keywords 陣列。
-        句子：\(sentence)
+
+        ## 4) 句子解析模式 JSON 结构
+        {
+          "queryType": "sentence",
+          "sentenceAnalysis": {
+            "original": "今日は雨が降りそうです。",
+            "translation": {
+              "chinese": "今天好像要下雨。",
+              "english": "It looks like it will rain today."
+            },
+            "wordBreakdown": [
+              {
+                "word": "今日",
+                "reading": "きょう",
+                "meaning": "今天",
+                "grammaticalRole": "時間名詞"
+              },
+              {
+                "word": "は",
+                "reading": "は",
+                "meaning": "（主题标记）",
+                "grammaticalRole": "係助詞"
+              }
+            ],
+            "grammarPoints": [
+              {
+                "pattern": "そうです",
+                "reading": "そうです",
+                "meaning": "样态推测",
+                "explanation": "表示根据外观或样子进行推测"
+              }
+            ]
+          }
+        }
+
+        ## 5) 未収録模式 JSON 结构
+        {
+          "queryType": "notFound",
+          "entries": [
+            {
+              "headword": "{输入原样}",
+              "reading": "(推定)",
+              "romaji": null,
+              "partOfSpeech": "未収録語",
+              "senses": [
+                {
+                  "definition": "語種：{和語/漢語/外来語(推定)}",
+                  "chinese": "未收录",
+                  "english": "Not found"
+                }
+              ],
+              "examples": [],
+              "related": {
+                "synonym": "{近义候选1／候选2}",
+                "antonym": null,
+                "derived": null
+              }
+            }
+          ]
+        }
+
+        ## MANDATORY REQUIREMENTS
+        ⚠️ CRITICAL - Your response MUST be valid JSON ONLY. No explanations, no markdown, no prefix/suffix.
+        ⚠️ CRITICAL - ALL fields marked as required MUST be present. Use null for optional fields if empty.
+        ⚠️ CRITICAL - Field names must match EXACTLY (case-sensitive): "headword", "reading", "romaji", "partOfSpeech", "accent", "senses", "grammar", "examples", "related"
+
+        Quality Rules:
+        - Forbidden: duplicate senses, empty definitions, kanji variants only, verbose explanations
+        - Required: Each sense has Japanese definition + Chinese + English translation; natural, common examples
+        - For multiple candidates: sort by modern usage frequency (common > literary > dialect), max 3 entries
+        - sentenceAnalysis field is REQUIRED when queryType is "sentence", but should be null for "word" or "notFound"
+        - entries field is REQUIRED for all queryType values
+
+        EXAMPLE 1 - Word Query "go":
+        {
+          "queryType": "word",
+          "entries": [
+            {
+              "headword": "行く",
+              "reading": "いく",
+              "romaji": "iku",
+              "partOfSpeech": "五段動詞・自動",
+              "accent": "い↗く［0］",
+              "senses": [
+                {
+                  "definition": "ある場所から別の場所へ移動する",
+                  "chinese": "去；前往",
+                  "english": "to go"
+                }
+              ],
+              "grammar": {
+                "conjugation": ["行きます", "行かない", "行った", "行って"],
+                "collocation": ["へ行く", "に行く", "学校に行く"],
+                "honorific": "いらっしゃる（尊敬）、参る（謙譲）"
+              },
+              "examples": [
+                {
+                  "japanese": "学校に行く。",
+                  "chinese": "去学校。",
+                  "english": "I go to school."
+                }
+              ],
+              "related": {
+                "synonym": "参る／いらっしゃる",
+                "antonym": "来る",
+                "derived": null
+              }
+            }
+          ],
+          "sentenceAnalysis": null
+        }
+
+        EXAMPLE 2 - Sentence Query:
+        {
+          "queryType": "sentence",
+          "entries": [],
+          "sentenceAnalysis": {
+            "original": "今日は雨が降りそうです。",
+            "translation": {
+              "chinese": "今天好像要下雨。",
+              "english": "It looks like it will rain today."
+            },
+            "wordBreakdown": [
+              {
+                "word": "今日",
+                "reading": "きょう",
+                "meaning": "今天",
+                "grammaticalRole": "時間名詞"
+              }
+            ],
+            "grammarPoints": [
+              {
+                "pattern": "そうです",
+                "reading": "そうです",
+                "meaning": "样态推测",
+                "explanation": "表示根据外观或样子进行推测"
+              }
+            ]
+          }
+        }
+
+        User Query: \(sentence)
+
+        Response (JSON only, no other text):
         """
     }
 
@@ -177,8 +504,20 @@ public final class LLMClient {
         }
         do {
             return try JSONDecoder().decode(LLMResult.self, from: content)
-        } catch {
-            throw LLMError.decodeFailed(error.localizedDescription)
+        } catch let primaryError {
+            // Log the actual response for debugging
+            let responseText = String(data: content, encoding: .utf8) ?? "Unable to decode response"
+            print("⚠️ Primary JSON Decode Failed. Attempting fallback parsing...")
+            print("📄 Response was: \(responseText)")
+            print("❌ Error: \(primaryError)")
+
+            // FALLBACK: Try to parse partial/malformed JSON
+            if let fallbackResult = tryFallbackParsing(content: content, originalQuery: prompt) {
+                print("✅ Fallback parsing succeeded")
+                return fallbackResult
+            }
+
+            throw LLMError.decodeFailed("AI返回格式错误。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
         }
     }
 
@@ -221,9 +560,173 @@ public final class LLMClient {
 
         do {
             return try JSONDecoder().decode(LLMResult.self, from: jsonData)
-        } catch {
-            throw LLMError.decodeFailed(error.localizedDescription)
+        } catch let primaryError {
+            // Log the actual response for debugging
+            let responseText = String(data: jsonData, encoding: .utf8) ?? "Unable to decode response"
+            print("⚠️ Primary JSON Decode Failed (Anthropic). Attempting fallback parsing...")
+            print("📄 Response was: \(responseText)")
+            print("❌ Error: \(primaryError)")
+
+            // FALLBACK: Try to parse partial/malformed JSON
+            if let fallbackResult = tryFallbackParsing(content: jsonData, originalQuery: prompt) {
+                print("✅ Fallback parsing succeeded")
+                return fallbackResult
+            }
+
+            throw LLMError.decodeFailed("AI返回格式错误 (Anthropic)。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
         }
+    }
+
+    // MARK: Fallback Parsing
+    /// Attempt to parse partial or malformed JSON responses
+    private func tryFallbackParsing(content: Data, originalQuery: String) -> LLMResult? {
+        guard String(data: content, encoding: .utf8) != nil else {
+            return nil
+        }
+
+        // Try to parse as generic JSON first
+        guard let jsonObj = try? JSONSerialization.jsonObject(with: content) as? [String: Any] else {
+            return nil
+        }
+
+        // Extract queryType
+        guard let queryTypeStr = jsonObj["queryType"] as? String,
+              let queryType = LLMQueryType(rawValue: queryTypeStr) else {
+            // No valid queryType - create a minimal notFound result
+            return createMinimalNotFoundResult(query: originalQuery)
+        }
+
+        switch queryType {
+        case .word, .notFound:
+            // Try to extract entries
+            if let entriesArray = jsonObj["entries"] as? [[String: Any]] {
+                let parsedEntries = entriesArray.compactMap { entryDict -> LLMDictEntry? in
+                    return parseEntryDict(entryDict)
+                }
+
+                if !parsedEntries.isEmpty {
+                    return LLMResult(
+                        queryType: queryType,
+                        entries: parsedEntries,
+                        sentenceAnalysis: nil
+                    )
+                }
+            }
+
+            // Fallback: create minimal entry
+            return createMinimalNotFoundResult(query: originalQuery)
+
+        case .sentence:
+            // For sentence analysis, require proper structure
+            // Don't fallback for sentences - they're too complex
+            return nil
+        }
+    }
+
+    /// Create a minimal "not found" result when parsing fails
+    private func createMinimalNotFoundResult(query: String) -> LLMResult {
+        let minimalEntry = LLMDictEntry(
+            headword: query,
+            reading: "(推定)",
+            romaji: nil,
+            partOfSpeech: "未収録語",
+            accent: nil,
+            senses: [
+                LLMSense(
+                    definition: "辞書に収録されていない語",
+                    chinese: "词典中未收录",
+                    english: "Not found in dictionary"
+                )
+            ],
+            grammar: nil,
+            examples: nil,
+            related: nil
+        )
+
+        return LLMResult(
+            queryType: .notFound,
+            entries: [minimalEntry],
+            sentenceAnalysis: nil
+        )
+    }
+
+    /// Parse a single entry dictionary with lenient field checking
+    private func parseEntryDict(_ dict: [String: Any]) -> LLMDictEntry? {
+        // Required fields with defaults
+        guard let headword = dict["headword"] as? String else { return nil }
+
+        let reading = dict["reading"] as? String ?? "(不明)"
+        let romaji = dict["romaji"] as? String
+        let partOfSpeech = dict["partOfSpeech"] as? String ?? "未分類"
+        let accent = dict["accent"] as? String
+
+        // Parse senses (required, at least one)
+        var senses: [LLMSense] = []
+        if let sensesArray = dict["senses"] as? [[String: Any]] {
+            senses = sensesArray.compactMap { senseDict in
+                guard let definition = senseDict["definition"] as? String,
+                      let chinese = senseDict["chinese"] as? String,
+                      let english = senseDict["english"] as? String else {
+                    return nil
+                }
+                return LLMSense(definition: definition, chinese: chinese, english: english)
+            }
+        }
+
+        // If no valid senses, use default
+        if senses.isEmpty {
+            senses = [LLMSense(
+                definition: "定義なし",
+                chinese: "无定义",
+                english: "No definition available"
+            )]
+        }
+
+        // Parse optional grammar
+        var grammar: LLMGrammar? = nil
+        if let grammarDict = dict["grammar"] as? [String: Any] {
+            grammar = LLMGrammar(
+                conjugation: grammarDict["conjugation"] as? [String],
+                collocation: grammarDict["collocation"] as? [String],
+                honorific: grammarDict["honorific"] as? String
+            )
+        }
+
+        // Parse optional examples
+        var examples: [LLMExample]? = nil
+        if let examplesArray = dict["examples"] as? [[String: Any]] {
+            let parsedExamples = examplesArray.compactMap { exDict -> LLMExample? in
+                guard let jp = exDict["japanese"] as? String,
+                      let cn = exDict["chinese"] as? String,
+                      let en = exDict["english"] as? String else {
+                    return nil
+                }
+                return LLMExample(japanese: jp, chinese: cn, english: en)
+            }
+            examples = parsedExamples.isEmpty ? nil : parsedExamples
+        }
+
+        // Parse optional related
+        var related: LLMRelated? = nil
+        if let relatedDict = dict["related"] as? [String: Any] {
+            related = LLMRelated(
+                synonym: relatedDict["synonym"] as? String,
+                antonym: relatedDict["antonym"] as? String,
+                derived: relatedDict["derived"] as? String
+            )
+        }
+
+        return LLMDictEntry(
+            headword: headword,
+            reading: reading,
+            romaji: romaji,
+            partOfSpeech: partOfSpeech,
+            accent: accent,
+            senses: senses,
+            grammar: grammar,
+            examples: examples,
+            related: related
+        )
     }
 
     // MARK: 簡易配額

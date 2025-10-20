@@ -134,6 +134,8 @@ public struct DBService: DBServiceProtocol {
                         -- "to X" pattern (e.g., "to go", "to be")
                         WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
                         WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
+                        -- Starts with word followed by clarifying parentheses (e.g., "japanese (language)")
+                        WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 1
                         -- Exact word match at start
                         WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
                         WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
@@ -154,7 +156,8 @@ public struct DBService: DBServiceProtocol {
                 )
                 ORDER BY
                     match_priority ASC,
-                    e.frequency_rank ASC,
+                    COALESCE(e.frequency_rank, 999999) ASC,
+                    e.created_at ASC,
                     LENGTH(e.headword) ASC
                 LIMIT ?
                 """
@@ -162,6 +165,7 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery,      // exact match
                     lowerQuery,      // "to X" exact
                     lowerQuery,      // "to X;" pattern
+                    lowerQuery,      // query followed by parentheses
                     lowerQuery,      // start with space
                     lowerQuery,      // start with semicolon
                     lowerQuery,      // middle with spaces (1)
@@ -183,6 +187,8 @@ public struct DBService: DBServiceProtocol {
                         -- "to X" pattern (e.g., "to go", "to be")
                         WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
                         WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
+                        -- Starts with word followed by clarifying parentheses (e.g., "japanese (language)")
+                        WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 1
                         -- Exact word match at start
                         WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
                         WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
@@ -199,7 +205,8 @@ public struct DBService: DBServiceProtocol {
                 WHERE LOWER(ws.definition_english) LIKE '%' || ? || '%'
                 ORDER BY
                     match_priority ASC,
-                    e.frequency_rank ASC,
+                    COALESCE(e.frequency_rank, 999999) ASC,
+                    e.created_at ASC,
                     LENGTH(e.headword) ASC
                 LIMIT ?
                 """
@@ -207,6 +214,7 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery,      // exact match
                     lowerQuery,      // "to X" exact
                     lowerQuery,      // "to X;" pattern
+                    lowerQuery,      // query followed by parentheses
                     lowerQuery,      // start with space
                     lowerQuery,      // start with semicolon
                     lowerQuery,      // middle with spaces (1)

@@ -50,6 +50,12 @@ public struct SearchService: SearchServiceProtocol {
         let useReverseSearch = shouldTryReverseSearch(query: sanitizedQuery, scriptType: scriptType)
         print("🔍 SearchService: useReverseSearch=\(useReverseSearch) for query='\(sanitizedQuery)'")
 
+        await ScriptDetectionMonitor.shared.record(
+            query: sanitizedQuery,
+            scriptType: scriptType,
+            useReverseSearch: useReverseSearch
+        )
+
         if useReverseSearch {
             // For English/Chinese queries, ONLY use reverse search
             // This prevents incorrect matches from forward search
@@ -71,7 +77,12 @@ public struct SearchService: SearchServiceProtocol {
         
         // Step 5: Classify match types and create SearchResults
         let searchResults = dbResults.map { entry in
-            let matchType = classifyMatchType(entry: entry, query: normalizedQuery)
+            let matchType = classifyMatchType(
+                entry: entry,
+                query: normalizedQuery,
+                scriptType: scriptType,
+                useReverseSearch: useReverseSearch
+            )
             return SearchResult(
                 id: entry.id,
                 entry: entry,
@@ -95,30 +106,77 @@ public struct SearchService: SearchServiceProtocol {
             // Tertiary: Frequency rank
             let lhsRank = lhs.entry.frequencyRank ?? Int.max
             let rhsRank = rhs.entry.frequencyRank ?? Int.max
-            return lhsRank < rhsRank
+            if lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+
+            // Quaternary: Preserve database ordering by created_at
+            if lhs.entry.createdAt != rhs.entry.createdAt {
+                return lhs.entry.createdAt < rhs.entry.createdAt
+            }
+
+            // Final fallback: stable ordering by id
+            return lhs.entry.id < rhs.entry.id
         }
         
         // Step 7: Limit to maxResults
         return Array(ranked.prefix(maxResults))
     }
     
-    private func classifyMatchType(entry: DictionaryEntry, query: String) -> SearchResult.MatchType {
+    private func classifyMatchType(
+        entry: DictionaryEntry,
+        query: String,
+        scriptType: ScriptType,
+        useReverseSearch: Bool
+    ) -> SearchResult.MatchType {
+        if useReverseSearch {
+            if let definitionMatch = bestDefinitionMatchQuality(for: entry, query: query) {
+                switch definitionMatch {
+                case .exact:
+                    return .exact
+                case .prefix:
+                    return .prefix
+                case .contains:
+                    return .contains
+                case .none:
+                    break
+                }
+            }
+
+            // Fallback: treat reverse-search hits without clear definition match as contains
+            return .contains
+        }
+
         let lowercaseQuery = query.lowercased()
-        
-        // Exact match check
-        if entry.headword.lowercased() == lowercaseQuery ||
-           entry.readingHiragana.lowercased() == lowercaseQuery ||
-           entry.readingRomaji.lowercased() == lowercaseQuery {
-            return .exact
+
+        // Exact match check based on detected script
+        switch scriptType {
+        case .romaji:
+            if entry.readingRomaji.lowercased() == lowercaseQuery {
+                return .exact
+            }
+        default:
+            if entry.headword.lowercased() == lowercaseQuery ||
+               entry.readingHiragana.lowercased() == lowercaseQuery ||
+               entry.readingRomaji.lowercased() == lowercaseQuery {
+                return .exact
+            }
         }
-        
+
         // Prefix match check
-        if entry.headword.lowercased().hasPrefix(lowercaseQuery) ||
-           entry.readingHiragana.lowercased().hasPrefix(lowercaseQuery) ||
-           entry.readingRomaji.lowercased().hasPrefix(lowercaseQuery) {
-            return .prefix
+        switch scriptType {
+        case .romaji:
+            if entry.readingRomaji.lowercased().hasPrefix(lowercaseQuery) {
+                return .prefix
+            }
+        default:
+            if entry.headword.lowercased().hasPrefix(lowercaseQuery) ||
+               entry.readingHiragana.lowercased().hasPrefix(lowercaseQuery) ||
+               entry.readingRomaji.lowercased().hasPrefix(lowercaseQuery) {
+                return .prefix
+            }
         }
-        
+
         // Contains match (default)
         return .contains
     }
@@ -205,6 +263,90 @@ public struct SearchService: SearchServiceProtocol {
             return false
         }
     }
+
+    private func bestDefinitionMatchQuality(for entry: DictionaryEntry, query: String) -> DefinitionMatchQuality? {
+        guard !entry.senses.isEmpty else {
+            return nil
+        }
+
+        var bestMatch: DefinitionMatchQuality = .none
+        let lowerQuery = query.lowercased()
+        let whitespaceSet = CharacterSet.whitespacesAndNewlines
+
+        for sense in entry.senses {
+            let english = sense.definitionEnglish.lowercased()
+            let englishSegments = english.split(separator: ";")
+
+            for segment in englishSegments {
+                let trimmed = segment.trimmingCharacters(in: whitespaceSet)
+                if trimmed.isEmpty { continue }
+
+                if trimmed == lowerQuery || trimmed == "to \(lowerQuery)" {
+                    return .exact
+                }
+
+                // Treat clarifying punctuation (e.g., "japanese (language)") as exact
+                if trimmed.hasPrefix(lowerQuery) {
+                    let remainder = trimmed.dropFirst(lowerQuery.count)
+                    let remainderTrimmed = remainder.trimmingCharacters(in: whitespaceSet)
+                    if remainderTrimmed.isEmpty {
+                        return .exact
+                    }
+                    if let firstScalar = remainderTrimmed.unicodeScalars.first,
+                       !CharacterSet.alphanumerics.contains(firstScalar) {
+                        return .exact
+                    }
+                }
+
+                if trimmed.hasPrefix("to \(lowerQuery)") {
+                    bestMatch = bestMatch.upgrading(to: .exact)
+                    continue
+                }
+
+                if trimmed.hasPrefix(lowerQuery + " ") ||
+                    trimmed.hasPrefix(lowerQuery + "-") ||
+                    trimmed.hasPrefix(lowerQuery + "(") {
+                    bestMatch = bestMatch.upgrading(to: .prefix)
+                    continue
+                }
+
+                let tokens = trimmed.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+                if tokens.contains(lowerQuery) {
+                    bestMatch = bestMatch.upgrading(to: .contains)
+                }
+            }
+
+            let chineseCandidates = [
+                sense.definitionChineseSimplified,
+                sense.definitionChineseTraditional
+            ]
+
+            for candidate in chineseCandidates {
+                guard let candidate, !candidate.isEmpty else { continue }
+                let segments = candidate.split(separator: ";")
+
+                for rawSegment in segments {
+                    let trimmed = rawSegment.trimmingCharacters(in: whitespaceSet)
+                    if trimmed.isEmpty { continue }
+
+                    if trimmed == query {
+                        return .exact
+                    }
+
+                    if trimmed.hasPrefix(query) {
+                        bestMatch = bestMatch.upgrading(to: .prefix)
+                        continue
+                    }
+
+                    if trimmed.contains(query) {
+                        bestMatch = bestMatch.upgrading(to: .contains)
+                    }
+                }
+            }
+        }
+
+        return bestMatch == .none ? nil : bestMatch
+    }
 }
 
 public enum SearchError: Error, LocalizedError {
@@ -227,5 +369,16 @@ public enum SearchError: Error, LocalizedError {
         case .searchFailed(let error):
             return "Search failed: \(error.localizedDescription)"
         }
+    }
+}
+
+private enum DefinitionMatchQuality: Int {
+    case exact = 0
+    case prefix = 1
+    case contains = 2
+    case none = 3
+
+    func upgrading(to newQuality: DefinitionMatchQuality) -> DefinitionMatchQuality {
+        return rawValue < newQuality.rawValue ? self : newQuality
     }
 }

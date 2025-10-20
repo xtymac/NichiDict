@@ -64,3 +64,12 @@ fastlane/test_output
 # Cursor & Claude
 .cursor/
 .claude/
+
+# Data files
+data/JMdict
+data/JMdict_e
+data/*.sqlite
+data/*.jsonl.gz
+
+# macOS
+.DS_Store

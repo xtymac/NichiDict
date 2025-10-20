@@ -40,15 +40,24 @@ public actor DatabaseManager {
             }
             
             let queue = try DatabaseQueue(path: dbURL.path, configuration: config)
+
+            // Edge case: Verify database integrity on first open
+            try await verifyDatabaseIntegrity(queue)
+
             _dbQueue = queue
             return queue
         }
     }
     
-    public func validateDatabaseIntegrity() async throws -> Bool {
-        let queue = try await dbQueue
-        
-        return try await queue.read { db in
+    /// Verify database integrity (corruption check)
+    private func verifyDatabaseIntegrity(_ queue: DatabaseQueue) async throws {
+        try await queue.read { db in
+            // SQLite integrity check
+            let integrityResult = try String.fetchOne(db, sql: "PRAGMA integrity_check")
+            guard integrityResult == "ok" else {
+                throw DatabaseError.corruptedDatabase(integrityResult ?? "Unknown error")
+            }
+
             // Verify required tables exist
             let requiredTables = ["dictionary_entries", "dictionary_fts", "word_senses", "example_sentences"]
             for table in requiredTables {
@@ -56,22 +65,26 @@ public actor DatabaseManager {
                     SELECT COUNT(*) > 0 FROM sqlite_master
                     WHERE type='table' AND name=?
                     """, arguments: [table])
-                
+
                 guard exists == true else {
                     throw DatabaseError.schemaMismatch("Missing table: \(table)")
                 }
             }
-            
+
             // Verify FTS sync
             let entryCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM dictionary_entries") ?? 0
             let ftsCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM dictionary_fts") ?? 0
-            
+
             guard entryCount == ftsCount else {
                 throw DatabaseError.ftsOutOfSync
             }
-            
-            return true
         }
+    }
+
+    public func validateDatabaseIntegrity() async throws -> Bool {
+        let queue = try await dbQueue
+        try await verifyDatabaseIntegrity(queue)
+        return true
     }
     
     // Test helper
@@ -84,20 +97,23 @@ public actor DatabaseManager {
 public enum DatabaseError: Error, LocalizedError {
     case seedDatabaseNotFound
     case seedDatabaseNotReadable
+    case corruptedDatabase(String)
     case schemaMismatch(String)
     case ftsOutOfSync
     case invalidConfiguration
     case unsupportedSchemaVersion(Int)
     case queryFailed(String)
-    
+
     public var errorDescription: String? {
         switch self {
         case .seedDatabaseNotFound:
             return "Dictionary database not found. Please reinstall the app."
         case .seedDatabaseNotReadable:
             return "Dictionary database is not readable."
+        case .corruptedDatabase(let details):
+            return "Dictionary database is corrupted: \(details). Please reinstall the app."
         case .schemaMismatch(let message):
-            return "Database schema mismatch: \(message)"
+            return "Database schema mismatch: \(message). Please reinstall the app."
         case .ftsOutOfSync:
             return "Search index is out of sync. Please reinstall the app."
         case .invalidConfiguration:

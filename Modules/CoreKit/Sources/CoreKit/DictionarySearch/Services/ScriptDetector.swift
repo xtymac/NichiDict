@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ScriptType {
+public enum ScriptType: Sendable {
     case kanji           // Pure kanji (likely Chinese input)
     case hiragana        // Pure hiragana (Japanese)
     case katakana        // Pure katakana (Japanese)

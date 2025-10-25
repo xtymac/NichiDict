@@ -1,0 +1,23 @@
+{
+  "stats": {
+    "total_entries": 5,
+    "processed": 0,
+    "skipped": 0,
+    "failed": 5,
+    "examples_generated": 0,
+    "api_calls": 0,
+    "start_time": "2025-10-20T21:21:55.898999"
+  },
+  "state": {
+    "date": "2025-10-20",
+    "api_calls_today": 0,
+    "last_processed_id": 0
+  },
+  "config": {
+    "db_path": "../data/dictionary_full_multilingual.sqlite",
+    "model": "gpt-4o-mini",
+    "max_rank": 1000,
+    "batch_size": 5,
+    "max_examples": 3
+  }
+}

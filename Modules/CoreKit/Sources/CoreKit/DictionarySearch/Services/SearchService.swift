@@ -39,7 +39,9 @@ public struct SearchService: SearchServiceProtocol {
         case .romaji:
             normalizedQuery = RomajiConverter.normalizeForSearch(sanitizedQuery)
         default:
-            normalizedQuery = sanitizedQuery
+            // Convert katakana to hiragana for better matching
+            // データ → でーた
+            normalizedQuery = sanitizedQuery.katakanaToHiragana()
         }
 
         // Step 4: Execute database search
@@ -48,7 +50,11 @@ public struct SearchService: SearchServiceProtocol {
 
         // Detect if this looks like English/Chinese query for reverse search
         let useReverseSearch = shouldTryReverseSearch(query: sanitizedQuery, scriptType: scriptType)
+        let isEnglishQuery = isLikelyEnglishQuery(query: sanitizedQuery, scriptType: scriptType)
         print("🔍 SearchService: useReverseSearch=\(useReverseSearch) for query='\(sanitizedQuery)'")
+        if useReverseSearch {
+            print("🔍 SearchService: isEnglishQuery=\(isEnglishQuery)")
+        }
 
         await ScriptDetectionMonitor.shared.record(
             query: sanitizedQuery,
@@ -60,9 +66,41 @@ public struct SearchService: SearchServiceProtocol {
             // For English/Chinese queries, ONLY use reverse search
             // This prevents incorrect matches from forward search
             print("🔍 SearchService: Using REVERSE search for '\(normalizedQuery)'")
+
+            // Extract semantic hints and core mappings for better ranking
+            var semanticHint: String? = nil
+            var searchQuery = normalizedQuery
+            var coreHeadwords: Set<String>? = nil
+
+            if isEnglishQuery {
+                // Check for parenthetical hints like "japanese (language)"
+                if EnglishJapaneseMapping.hasParenthetical(normalizedQuery) {
+                    semanticHint = EnglishJapaneseMapping.extractSemanticHint(from: normalizedQuery)
+                    searchQuery = EnglishJapaneseMapping.extractBaseWord(from: normalizedQuery)
+                    print("🔍 SearchService: Extracted hint='\(semanticHint ?? "")' baseWord='\(searchQuery)'")
+
+                    // If we have a semantic hint, try to get core mapping for it too
+                    if let hint = semanticHint {
+                        coreHeadwords = EnglishJapaneseMapping.canonicalHeadwords(forEnglishWord: hint)
+                    }
+                }
+
+                // Get core native equivalents for the base word
+                if coreHeadwords == nil {
+                    coreHeadwords = EnglishJapaneseMapping.canonicalHeadwords(forEnglishWord: searchQuery)
+                }
+
+                if let coreHeadwords = coreHeadwords {
+                    print("🔍 SearchService: Core native headwords: \(coreHeadwords)")
+                }
+            }
+
             dbResults = try await dbService.searchReverse(
-                query: normalizedQuery,
-                limit: searchLimit
+                query: searchQuery,
+                limit: searchLimit,
+                isEnglishQuery: isEnglishQuery,
+                semanticHint: semanticHint,
+                coreHeadwords: coreHeadwords
             )
             print("🔍 SearchService: Reverse search returned \(dbResults.count) results")
         } else {
@@ -92,31 +130,36 @@ public struct SearchService: SearchServiceProtocol {
         }
         
         // Step 6: Rank results
-        let ranked = searchResults.sorted { lhs, rhs in
-            // Primary: Match type
-            if lhs.matchType != rhs.matchType {
-                return lhs.matchType < rhs.matchType
-            }
-            
-            // Secondary: Relevance score
-            if lhs.relevanceScore != rhs.relevanceScore {
-                return lhs.relevanceScore > rhs.relevanceScore
-            }
-            
-            // Tertiary: Frequency rank
-            let lhsRank = lhs.entry.frequencyRank ?? Int.max
-            let rhsRank = rhs.entry.frequencyRank ?? Int.max
-            if lhsRank != rhsRank {
-                return lhsRank < rhsRank
-            }
+        let ranked: [SearchResult]
+        if useReverseSearch {
+            ranked = searchResults
+        } else {
+            ranked = searchResults.sorted { lhs, rhs in
+                // Primary: Match type
+                if lhs.matchType != rhs.matchType {
+                    return lhs.matchType < rhs.matchType
+                }
+                
+                // Secondary: Relevance score
+                if lhs.relevanceScore != rhs.relevanceScore {
+                    return lhs.relevanceScore > rhs.relevanceScore
+                }
+                
+                // Tertiary: Frequency rank
+                let lhsRank = lhs.entry.frequencyRank ?? Int.max
+                let rhsRank = rhs.entry.frequencyRank ?? Int.max
+                if lhsRank != rhsRank {
+                    return lhsRank < rhsRank
+                }
 
-            // Quaternary: Preserve database ordering by created_at
-            if lhs.entry.createdAt != rhs.entry.createdAt {
-                return lhs.entry.createdAt < rhs.entry.createdAt
-            }
+                // Quaternary: Preserve database ordering by created_at
+                if lhs.entry.createdAt != rhs.entry.createdAt {
+                    return lhs.entry.createdAt < rhs.entry.createdAt
+                }
 
-            // Final fallback: stable ordering by id
-            return lhs.entry.id < rhs.entry.id
+                // Final fallback: stable ordering by id
+                return lhs.entry.id < rhs.entry.id
+            }
         }
         
         // Step 7: Limit to maxResults
@@ -213,40 +256,7 @@ public struct SearchService: SearchServiceProtocol {
     private func shouldTryReverseSearch(query: String, scriptType: ScriptType) -> Bool {
         switch scriptType {
         case .romaji:
-            // Romaji could be English OR Japanese romanization
-            let lowerQuery = query.lowercased()
-
-            // Common English words that should use reverse search
-            let commonEnglishWords = [
-                "go", "do", "be", "am", "is", "are", "was", "were",
-                "eat", "run", "see", "get", "make", "take", "come",
-                "know", "think", "look", "want", "give", "use", "find",
-                "tell", "ask", "work", "feel", "try", "leave", "call"
-            ]
-
-            if commonEnglishWords.contains(lowerQuery) {
-                return true  // Definitely English
-            }
-
-            // Japanese particles (should NOT use reverse search)
-            let japaneseParticles = ["wa", "ga", "wo", "o", "ni", "de", "to", "ya", "ka", "ne", "yo"]
-            if japaneseParticles.contains(lowerQuery) {
-                return false  // Japanese particle
-            }
-
-            // Very short (1 char) likely Japanese
-            if query.count <= 1 {
-                return false
-            }
-
-            // Check if it looks like common Japanese words in romaji
-            let japaneseRomajiPrefixes = ["ta", "ka", "sa", "na", "ha", "ma", "ya", "ra"]
-            if japaneseRomajiPrefixes.contains(where: { lowerQuery.hasPrefix($0 + "be") || lowerQuery.hasPrefix($0 + "ku") }) {
-                return false  // Likely Japanese verb/adjective (e.g., "taberu", "kaku")
-            }
-
-            // Default: treat 2+ character romaji as English for reverse search
-            return true
+            return isLikelyEnglishQuery(query: query, scriptType: scriptType)
 
         case .kanji:
             // Pure kanji (4+ characters) is more likely Chinese input
@@ -262,6 +272,43 @@ public struct SearchService: SearchServiceProtocol {
             // Contains Japanese kana - definitely Japanese
             return false
         }
+    }
+
+    private func isLikelyEnglishQuery(query: String, scriptType: ScriptType) -> Bool {
+        guard scriptType == .romaji else { return false }
+
+        let lowerQuery = query.lowercased()
+
+        let commonEnglishWords = [
+            "go", "do", "be", "am", "is", "are", "was", "were",
+            "eat", "run", "see", "get", "make", "take", "come",
+            "know", "think", "look", "want", "give", "use", "find",
+            "tell", "ask", "work", "feel", "try", "leave", "call",
+            "star", "car", "bus", "train", "game", "play", "phone",
+            "music", "movie"
+        ]
+
+        if commonEnglishWords.contains(lowerQuery) {
+            return true
+        }
+
+        let japaneseParticles = ["wa", "ga", "wo", "o", "ni", "de", "to", "ya", "ka", "ne", "yo"]
+        if japaneseParticles.contains(lowerQuery) {
+            return false
+        }
+
+        guard query.count > 1 else {
+            return false
+        }
+
+        let japaneseRomajiPrefixes = ["ta", "ka", "sa", "na", "ha", "ma", "ya", "ra"]
+        if japaneseRomajiPrefixes.contains(where: { prefix in
+            lowerQuery.hasPrefix(prefix + "be") || lowerQuery.hasPrefix(prefix + "ku")
+        }) {
+            return false
+        }
+
+        return true
     }
 
     private func bestDefinitionMatchQuality(for entry: DictionaryEntry, query: String) -> DefinitionMatchQuality? {

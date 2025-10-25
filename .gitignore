@@ -71,5 +71,14 @@ data/JMdict_e
 data/*.sqlite
 data/*.jsonl.gz
 
+# Test fixtures - large database files
+**/Fixtures/*.sqlite
+
 # macOS
 .DS_Store
+
+# Batch generation logs and temporary files
+batch_generate_log_*.json
+batch_generation.log
+.batch_generate_state.json
+dict.db

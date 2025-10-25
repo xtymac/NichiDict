@@ -1,0 +1,28 @@
+name: CI Smoke Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+jobs:
+  japanese-language-ranking:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcpretty
+        run: |
+          gem install xcpretty
+
+      - name: Run Japanese language ranking regression
+        run: |
+          set -o pipefail
+          cd Modules/CoreKit
+          xcodebuild \
+            -scheme CoreKit \
+            -destination 'platform=macOS,arch=arm64' \
+            -only-testing:CoreKitTests/EnglishReverseSearchTests/testJapaneseLanguageRanking \
+            test | xcpretty

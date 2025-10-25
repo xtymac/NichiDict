@@ -3,7 +3,13 @@ import Foundation
 
 public protocol DBServiceProtocol: Sendable {
     func searchEntries(query: String, limit: Int) async throws -> [DictionaryEntry]
-    func searchReverse(query: String, limit: Int) async throws -> [DictionaryEntry]
+    func searchReverse(
+        query: String,
+        limit: Int,
+        isEnglishQuery: Bool,
+        semanticHint: String?,
+        coreHeadwords: Set<String>?
+    ) async throws -> [DictionaryEntry]
     func fetchEntry(id: Int) async throws -> DictionaryEntry?
     func validateDatabaseIntegrity() async throws -> Bool
 }
@@ -100,9 +106,15 @@ public struct DBService: DBServiceProtocol {
         }
     }
 
-    public func searchReverse(query: String, limit: Int) async throws -> [DictionaryEntry] {
+    public func searchReverse(
+        query: String,
+        limit: Int,
+        isEnglishQuery: Bool,
+        semanticHint: String? = nil,
+        coreHeadwords: Set<String>? = nil
+    ) async throws -> [DictionaryEntry] {
         // Reverse search: English/Chinese → Japanese
-        print("🗄️ DBService.searchReverse: query='\(query)' limit=\(limit)")
+        print("🗄️ DBService.searchReverse: query='\(query)' limit=\(limit) semanticHint=\(semanticHint ?? "nil") coreHeadwords=\(coreHeadwords?.count ?? 0)")
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
             print("🗄️ DBService.searchReverse: Empty query, returning []")
             return []
@@ -121,109 +133,220 @@ public struct DBService: DBServiceProtocol {
                 WHERE name IN ('definition_chinese_simplified', 'definition_chinese_traditional')
                 """) ?? false
 
+            // Build core headwords filter if provided
+            let coreHeadwordsArray = coreHeadwords.map { Array($0) } ?? []
+
             let sql: String
-            let arguments: [DatabaseValueConvertible]
+            var arguments: [DatabaseValueConvertible]
 
             if hasChineseColumns {
                 // Multilingual database with Chinese support
                 sql = """
-                SELECT DISTINCT e.*,
-                    CASE
-                        -- Exact match to whole definition (highest priority)
-                        WHEN LOWER(ws.definition_english) = ? THEN 0
-                        -- "to X" pattern (e.g., "to go", "to be")
-                        WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
-                        WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
-                        -- Starts with word followed by clarifying parentheses (e.g., "japanese (language)")
-                        WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 1
-                        -- Exact word match at start
-                        WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
-                        WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
-                        -- Exact word match in middle/end with word boundaries
-                        WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ' %' THEN 3
-                        WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || ';%' THEN 3
-                        WHEN LOWER(ws.definition_english) LIKE '% ' || ? THEN 3
-                        WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
-                        -- Contains (lowest priority)
-                        ELSE 4
-                    END AS match_priority
-                FROM dictionary_entries e
-                JOIN word_senses ws ON e.id = ws.entry_id
-                WHERE (
-                    LOWER(ws.definition_english) LIKE '%' || ? || '%'
-                    OR COALESCE(ws.definition_chinese_simplified, '') LIKE '%' || ? || '%'
-                    OR COALESCE(ws.definition_chinese_traditional, '') LIKE '%' || ? || '%'
+                WITH candidate AS (
+                    SELECT
+                        e.id,
+                        e.headword,
+                        e.reading_hiragana,
+                        e.reading_romaji,
+                        e.frequency_rank,
+                        e.pitch_accent,
+                        e.created_at,
+                        ws.definition_english,
+                        ws.definition_chinese_simplified,
+                        ws.definition_chinese_traditional,
+                        ws.part_of_speech,
+                        -- Match priority: exact > prefix > word boundary > contains
+                        CASE
+                            WHEN LOWER(ws.definition_english) = ? THEN 0
+                            WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
+                            WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ' %' THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || ';%' THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
+                            ELSE 4
+                        END AS match_priority,
+                        -- Parenthetical priority: "word (hint)" gets boost
+                        CASE
+                            WHEN LOWER(ws.definition_english) = ? THEN 0
+                            WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 0
+                            ELSE 1
+                        END AS parenthetical_priority,
+                        -- Part-of-speech weight: verb=0, noun=1, other=2
+                        CASE
+                            WHEN ws.part_of_speech LIKE '%verb%' THEN 0
+                            WHEN ws.part_of_speech LIKE '%noun%' THEN 1
+                            ELSE 2
+                        END AS pos_weight
+                    FROM dictionary_entries e
+                    JOIN word_senses ws ON e.id = ws.entry_id
+                    WHERE (
+                        LOWER(ws.definition_english) LIKE '%' || ? || '%'
+                        OR COALESCE(ws.definition_chinese_simplified, '') LIKE '%' || ? || '%'
+                        OR COALESCE(ws.definition_chinese_traditional, '') LIKE '%' || ? || '%'
+                    )
+                ),
+                aggregated AS (
+                    SELECT
+                        c.id,
+                        MIN(c.match_priority) AS match_priority,
+                        MIN(c.parenthetical_priority) AS parenthetical_priority,
+                        MIN(c.pos_weight) AS pos_weight
+                    FROM candidate c
+                    GROUP BY c.id
                 )
+                SELECT e.*
+                FROM aggregated agg
+                JOIN dictionary_entries e ON e.id = agg.id
                 ORDER BY
-                    match_priority ASC,
-                    COALESCE(e.frequency_rank, 999999) ASC,
-                    e.created_at ASC,
-                    LENGTH(e.headword) ASC
+                    -- Priority 1: Core native equivalent (if provided)
+                    CASE
+                        WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 2: Parenthetical semantic match
+                    agg.parenthetical_priority,
+                    -- Priority 3: Part-of-speech (verbs > nouns > other)
+                    agg.pos_weight,
+                    -- Priority 4: Common words
+                    CASE
+                        WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 5: DEMOTE pure katakana (reverse of old logic)
+                    CASE
+                        WHEN ? = 1
+                             AND e.headword != ''
+                             AND e.headword GLOB '[ァ-ヶー]*'
+                             AND e.headword NOT GLOB '*[ぁ-ん一-龯]*'
+                        THEN 1
+                        ELSE 0
+                    END,
+                    -- Priority 6: Match quality
+                    agg.match_priority,
+                    -- Priority 7: Frequency
+                    COALESCE(e.frequency_rank, 999999),
+                    -- Tie-breakers
+                    e.created_at,
+                    e.id
                 LIMIT ?
                 """
                 arguments = [
-                    lowerQuery,      // exact match
-                    lowerQuery,      // "to X" exact
-                    lowerQuery,      // "to X;" pattern
-                    lowerQuery,      // query followed by parentheses
-                    lowerQuery,      // start with space
-                    lowerQuery,      // start with semicolon
-                    lowerQuery,      // middle with spaces (1)
-                    lowerQuery,      // middle with semicolons
-                    lowerQuery,      // end with space
-                    lowerQuery,      // "; X; " pattern
-                    lowerQuery,      // english LIKE
-                    query,           // chinese simplified
-                    query,           // chinese traditional
-                    limit * 2        // Get more for filtering
+                    lowerQuery, lowerQuery, lowerQuery,  // match_priority
+                    lowerQuery, lowerQuery,              // match_priority continued
+                    lowerQuery, lowerQuery, lowerQuery, lowerQuery,  // match_priority continued
+                    lowerQuery, lowerQuery,              // parenthetical_priority
+                    lowerQuery, query, query,            // WHERE clause
                 ]
+                // Add core headwords if provided
+                if !coreHeadwordsArray.isEmpty {
+                    arguments.append(contentsOf: coreHeadwordsArray.map { $0 as DatabaseValueConvertible })
+                }
+                arguments.append(isEnglishQuery ? 1 : 0)  // katakana check
+                arguments.append(limit * 2)               // LIMIT
             } else {
                 // English-only database (test fixtures)
                 sql = """
-                SELECT DISTINCT e.*,
-                    CASE
-                        -- Exact match to whole definition (highest priority)
-                        WHEN LOWER(ws.definition_english) = ? THEN 0
-                        -- "to X" pattern (e.g., "to go", "to be")
-                        WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
-                        WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
-                        -- Starts with word followed by clarifying parentheses (e.g., "japanese (language)")
-                        WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 1
-                        -- Exact word match at start
-                        WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
-                        WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
-                        -- Exact word match in middle/end with word boundaries
-                        WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ' %' THEN 3
-                        WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || ';%' THEN 3
-                        WHEN LOWER(ws.definition_english) LIKE '% ' || ? THEN 3
-                        WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
-                        -- Contains (lowest priority)
-                        ELSE 4
-                    END AS match_priority
-                FROM dictionary_entries e
-                JOIN word_senses ws ON e.id = ws.entry_id
-                WHERE LOWER(ws.definition_english) LIKE '%' || ? || '%'
+                WITH candidate AS (
+                    SELECT
+                        e.id,
+                        e.headword,
+                        e.reading_hiragana,
+                        e.reading_romaji,
+                        e.frequency_rank,
+                        e.pitch_accent,
+                        e.created_at,
+                        ws.definition_english,
+                        ws.part_of_speech,
+                        -- Match priority
+                        CASE
+                            WHEN LOWER(ws.definition_english) = ? THEN 0
+                            WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
+                            WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ' %' THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || ';%' THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
+                            ELSE 4
+                        END AS match_priority,
+                        -- Parenthetical priority
+                        CASE
+                            WHEN LOWER(ws.definition_english) = ? THEN 0
+                            WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 0
+                            ELSE 1
+                        END AS parenthetical_priority,
+                        -- Part-of-speech weight
+                        CASE
+                            WHEN ws.part_of_speech LIKE '%verb%' THEN 0
+                            WHEN ws.part_of_speech LIKE '%noun%' THEN 1
+                            ELSE 2
+                        END AS pos_weight
+                    FROM dictionary_entries e
+                    JOIN word_senses ws ON e.id = ws.entry_id
+                    WHERE LOWER(ws.definition_english) LIKE '%' || ? || '%'
+                ),
+                aggregated AS (
+                    SELECT
+                        c.id,
+                        MIN(c.match_priority) AS match_priority,
+                        MIN(c.parenthetical_priority) AS parenthetical_priority,
+                        MIN(c.pos_weight) AS pos_weight
+                    FROM candidate c
+                    GROUP BY c.id
+                )
+                SELECT e.*
+                FROM aggregated agg
+                JOIN dictionary_entries e ON e.id = agg.id
                 ORDER BY
-                    match_priority ASC,
-                    COALESCE(e.frequency_rank, 999999) ASC,
-                    e.created_at ASC,
-                    LENGTH(e.headword) ASC
+                    -- Priority 1: Core native equivalent
+                    CASE
+                        WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 2: Parenthetical semantic match
+                    agg.parenthetical_priority,
+                    -- Priority 3: Part-of-speech
+                    agg.pos_weight,
+                    -- Priority 4: Common words
+                    CASE
+                        WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 5: DEMOTE pure katakana
+                    CASE
+                        WHEN ? = 1
+                             AND e.headword != ''
+                             AND e.headword GLOB '[ァ-ヶー]*'
+                             AND e.headword NOT GLOB '*[ぁ-ん一-龯]*'
+                        THEN 1
+                        ELSE 0
+                    END,
+                    -- Priority 6: Match quality
+                    agg.match_priority,
+                    -- Priority 7: Frequency
+                    COALESCE(e.frequency_rank, 999999),
+                    -- Tie-breakers
+                    e.created_at,
+                    e.id
                 LIMIT ?
                 """
                 arguments = [
-                    lowerQuery,      // exact match
-                    lowerQuery,      // "to X" exact
-                    lowerQuery,      // "to X;" pattern
-                    lowerQuery,      // query followed by parentheses
-                    lowerQuery,      // start with space
-                    lowerQuery,      // start with semicolon
-                    lowerQuery,      // middle with spaces (1)
-                    lowerQuery,      // middle with semicolons
-                    lowerQuery,      // end with space
-                    lowerQuery,      // "; X; " pattern
-                    lowerQuery,      // english LIKE
-                    limit * 2        // Get more for filtering
+                    lowerQuery, lowerQuery, lowerQuery,  // match_priority
+                    lowerQuery, lowerQuery,              // match_priority continued
+                    lowerQuery, lowerQuery, lowerQuery, lowerQuery,  // match_priority continued
+                    lowerQuery, lowerQuery,              // parenthetical_priority
+                    lowerQuery,                          // WHERE clause
                 ]
+                // Add core headwords if provided
+                if !coreHeadwordsArray.isEmpty {
+                    arguments.append(contentsOf: coreHeadwordsArray.map { $0 as DatabaseValueConvertible })
+                }
+                arguments.append(isEnglishQuery ? 1 : 0)  // katakana check
+                arguments.append(limit * 2)               // LIMIT
             }
 
             let entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))

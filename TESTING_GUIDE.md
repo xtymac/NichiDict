@@ -364,6 +364,37 @@ sqlite3 "$APP_PATH/seed.sqlite" "PRAGMA integrity_check;"
    - 驗證詞彙高亮
    - 測試例句滾動
 
+## 🔍 Debug：Script Detection Snapshot（僅限 DEBUG）
+
+- 在 Debug build 中開啟搜尋頁面，可透過右上角 `Debug` 選單叫出統計工具：
+  - `Dump Script Stats`：輸出目前累積的腳本偵測次數與 romaji 反查的可疑案例。
+  - `Dump Script Stats (JSON)`：以 JSON 形式輸出，方便貼進 Slack / QA 報告。
+  - `Reset Script Stats`：清除計數，便於重複測試。
+  - `Set Outlier Threshold`：調整多少次以上才視為可疑（預設 3 次）。
+- 亦可在 LLDB / Console 呼叫：
+
+```swift
+Task { await DebugTools.dumpScriptStats(minCount: 2, asJSON: true) }
+```
+
+## ✅ CI Smoke Test：Japanese Language Ranking
+
+- GitHub Actions Workflow: `.github/workflows/ci-smoke.yml`
+- 每個 Pull Request 皆會執行 `testJapaneseLanguageRanking`，確保英語反查 `Japanese` 時 `日本語` 排名第一。
+- 關鍵指令（可本地手動驗證）：
+
+```bash
+cd Modules/CoreKit
+set -o pipefail
+xcodebuild \
+  -scheme CoreKit \
+  -destination 'platform=macOS,arch=arm64' \
+  -only-testing:CoreKitTests/EnglishReverseSearchTests/testJapaneseLanguageRanking \
+  test | xcpretty
+```
+
+如測試失敗，CI 會阻擋合併，請檢查資料庫排序或 Script Detection 行為。
+
 ## ❓ 常見問題
 
 ### Q: App 啟動很慢？

@@ -71,12 +71,12 @@ public struct LLMRelated: Codable, Hashable {
     }
 }
 
-public struct LLMExample: Codable, Hashable {
+public struct LLMExample: Codable, Hashable, Sendable {
     public let japanese: String    // 日语例句
-    public let chinese: String     // 中文翻译
+    public let chinese: String?    // 中文翻译（可选，仅中文用户生成）
     public let english: String     // 英文翻译
 
-    public init(japanese: String, chinese: String, english: String) {
+    public init(japanese: String, chinese: String? = nil, english: String) {
         self.japanese = japanese
         self.chinese = chinese
         self.english = english
@@ -92,10 +92,10 @@ public enum LLMQueryType: String, Codable {
 
 public struct LLMResult: Codable, Hashable {
     public let queryType: LLMQueryType        // 查询类型
-    public let entries: [LLMDictEntry]        // 词条（最多top_k个）
+    public let entries: [LLMDictEntry]?       // 词条（最多top_k个，句子查询时可选）
     public let sentenceAnalysis: LLMSentenceAnalysis?  // 句子解析（仅句子查询）
 
-    public init(queryType: LLMQueryType, entries: [LLMDictEntry], sentenceAnalysis: LLMSentenceAnalysis?) {
+    public init(queryType: LLMQueryType, entries: [LLMDictEntry]?, sentenceAnalysis: LLMSentenceAnalysis?) {
         self.queryType = queryType
         self.entries = entries
         self.sentenceAnalysis = sentenceAnalysis
@@ -103,17 +103,20 @@ public struct LLMResult: Codable, Hashable {
 }
 
 public struct LLMSentenceAnalysis: Codable, Hashable {
-    public let original: String                    // 原句
-    public let translation: LLMTranslation         // 翻译（中英）
-    public let wordBreakdown: [LLMWordBreakdown]   // 逐词解析
-    public let grammarPoints: [LLMGrammarPoint]    // 语法点
+    public let original: String                     // 原句
+    public let translation: LLMTranslation          // 翻译（中英）
+    public let wordBreakdown: [LLMWordBreakdown]?   // 逐词解析（可选）
+    public let grammarPoints: [LLMGrammarPoint]?    // 语法点（可选）
+    public let examples: [LLMExample]?              // 例句（可选）
 
     public init(original: String, translation: LLMTranslation,
-                wordBreakdown: [LLMWordBreakdown], grammarPoints: [LLMGrammarPoint]) {
+                wordBreakdown: [LLMWordBreakdown]?, grammarPoints: [LLMGrammarPoint]?,
+                examples: [LLMExample]? = nil) {
         self.original = original
         self.translation = translation
         self.wordBreakdown = wordBreakdown
         self.grammarPoints = grammarPoints
+        self.examples = examples
     }
 }
 
@@ -159,7 +162,7 @@ public struct LLMGrammarPoint: Codable, Hashable {
 public enum LLMProvider {
     case openAI(model: String)      // 例: "gpt-4o-mini" / "gpt-4.1-mini"
     case anthropic(model: String)   // 例: "claude-3-haiku"
-    // 需要可再擴: case google(model: String)
+    case gemini(model: String)      // 例: "gemini-2.0-flash-exp" / "gemini-1.5-flash"
 }
 
 // MARK: - 錯誤
@@ -214,11 +217,29 @@ public final class LLMClient {
     // 可選：調整每日上限（默認 50 次）
     public var dailyLimit: Int = 50
 
+    // Clear all caches (for debugging or when language changes)
+    public func clearAllCaches() {
+        print("🗑️ Clearing all AI caches...")
+        memCache.removeAllObjects()
+
+        // Clear disk cache
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: diskCacheDir, includingPropertiesForKeys: nil)
+            for file in files {
+                try? FileManager.default.removeItem(at: file)
+            }
+            print("✅ All caches cleared (\(files.count) disk files removed)")
+        } catch {
+            print("⚠️ Error clearing disk cache: \(error)")
+        }
+    }
+
     // MARK: 對外主方法
     @discardableResult
     public func translateExplain(sentence: String,
                                  locale: String = "zh",
-                                 useCache: Bool = true) async throws -> LLMResult {
+                                 useCache: Bool = true,
+                                 onPartialResult: (@Sendable (String) -> Void)? = nil) async throws -> LLMResult {
 
         guard let _ = apiKey, let provider = provider else {
             throw LLMError.notConfigured
@@ -226,24 +247,46 @@ public final class LLMClient {
 
         // 命中快取
         let key = cacheKey(sentence: sentence, provider: provider, locale: locale)
+        print("🔑 Cache key calculation:")
+        print("   - sentence: \(sentence)")
+        print("   - provider: \(providerIdentifier(provider))")
+        print("   - locale: \(locale)")
+        print("   - version: v3")
+        print("   - resulting key: \(key)")
+
         if useCache, let cached: LLMResult = loadCache(for: key) {
+            print("✅ Cache HIT - returning cached result")
+            print("   ⚠️ If content is wrong language, the app may need a clean restart")
             return cached
         }
+        print("❌ Cache MISS - will request AI")
 
         // 配額判斷
         try checkDailyQuota()
 
         // 組裝提示（要求返回 JSON）
         let prompt = buildPrompt(sentence: sentence, locale: locale)
+        print("📤 Sending AI request with locale: \(locale)")
+        print("📝 Prompt length: \(prompt.count) characters")
 
-        // 發送請求
+        // 發送請求（添加性能监控）
+        let startTime = Date()
         let result: LLMResult
         switch provider {
         case .openAI(let model):
             result = try await requestOpenAI(model: model, prompt: prompt)
         case .anthropic(let model):
             result = try await requestAnthropic(model: model, prompt: prompt)
+        case .gemini(let model):
+            // 如果提供了回调，使用流式响应
+            if let callback = onPartialResult {
+                result = try await requestGeminiStreaming(model: model, prompt: prompt, onPartialResult: callback)
+            } else {
+                result = try await requestGemini(model: model, prompt: prompt)
+            }
         }
+        let duration = Date().timeIntervalSince(startTime)
+        print("✅ AI response received in \(String(format: "%.2f", duration))s")
 
         // 寫入快取 + 計數
         saveCache(result, for: key)
@@ -252,13 +295,90 @@ public final class LLMClient {
         return result
     }
 
+    public func generateExamples(for entry: DictionaryEntry,
+                                 senses providedSenses: [WordSense]? = nil,
+                                 locale: String = Locale.current.identifier,
+                                 maxExamples: Int = 3,
+                                 useCache: Bool = true) async throws -> [LLMExample] {
+        guard let _ = apiKey, let provider = provider else {
+            throw LLMError.notConfigured
+        }
+
+        let senses = (providedSenses ?? entry.senses).filter { !$0.definitionEnglish.isEmpty }
+        guard !senses.isEmpty else {
+            return []
+        }
+
+        let key = cacheKeyForExamples(
+            entryID: entry.id,
+            provider: provider,
+            locale: locale,
+            maxExamples: maxExamples,
+            senses: senses
+        )
+
+        if useCache, let cached: ExampleResponse = loadCache(for: key) {
+            return cached.examples
+        }
+
+        try checkDailyQuota()
+
+        let prompt = buildExamplePrompt(
+            entry: entry,
+            senses: senses,
+            locale: locale,
+            maxExamples: maxExamples
+        )
+
+        let responseData: Data
+        switch provider {
+        case .openAI(let model):
+            responseData = try await requestOpenAIContent(model: model, prompt: prompt)
+        case .anthropic(let model):
+            responseData = try await requestAnthropicContent(model: model, prompt: prompt)
+        case .gemini(let model):
+            responseData = try await requestGeminiContent(model: model, prompt: prompt)
+        }
+
+        let response: ExampleResponse
+        do {
+            response = try JSONDecoder().decode(ExampleResponse.self, from: responseData)
+        } catch {
+            let raw = String(data: responseData, encoding: .utf8) ?? ""
+            throw LLMError.decodeFailed("例句解析失败: \(error.localizedDescription)\n\(raw.prefix(200))")
+        }
+
+        saveCache(response, for: key)
+        increaseDailyCount()
+
+        return response.examples
+    }
+
     // MARK: Prompt
     private func buildPrompt(sentence: String, locale: String) -> String {
-        // Note: locale parameter available for future use if needed for localized prompts
-        _ = locale
+        // Detect user's primary language from locale
+        let isChineseUser = locale.hasPrefix("zh")
+        let primaryLanguage = isChineseUser ? "Chinese (Simplified)" : "English"
+        let secondaryLanguage = isChineseUser ? "English" : "Chinese (Simplified)"
+
+        print("🌍 Building prompt for locale: \(locale)")
+        print("🌍 Primary language: \(primaryLanguage)")
+        print("🌍 Secondary language: \(secondaryLanguage)")
 
         return """
         You are a professional Japanese dictionary system. Map user input (Chinese/English/Japanese) to the most appropriate Japanese dictionary entries.
+
+        ⚠️ CRITICAL LANGUAGE REQUIREMENT ⚠️
+        The user's system language is: \(primaryLanguage)
+        YOU MUST write ALL explanations, meanings, grammatical roles, and descriptions in \(primaryLanguage).
+        DO NOT use \(secondaryLanguage) for explanatory content.
+
+        Specifically:
+        - In "wordBreakdown" array: "meaning" and "grammaticalRole" MUST be in \(primaryLanguage)
+        - In "grammarPoints" array: "meaning" and "explanation" MUST be in \(primaryLanguage)
+        - Only the "translation" object should contain both languages
+
+        Example: If primaryLanguage is English, write "money" not "钱", write "noun" not "名词"
 
         CRITICAL: You MUST return valid JSON that EXACTLY matches the schema below. Do not add any text before or after the JSON.
 
@@ -269,11 +389,16 @@ public final class LLMClient {
 
         ## Step 2: Response Rules
         - Primary language: Japanese definitions
-        - Provide short Chinese (Simplified) and English translations
+        - User's primary language: \(primaryLanguage) (use this for main explanations in "meaning", "explanation", and "grammaticalRole" fields)
+        - User's secondary language: \(secondaryLanguage) (use this for the corresponding field)
+        - Provide translations in both \(primaryLanguage) and \(secondaryLanguage)
         - No redundancy: merge same meanings/POS/definitions
-        - Max 3 senses per entry, 2-3 examples
+        - Max 3 senses per entry, 2-3 examples per word
+        - For sentence analysis: provide 2-3 similar example sentences in the "examples" array
         - Use「(推定)」for uncertain information
         - For Chinese/English input (e.g., "noon", "eat"), map to Japanese entries (e.g., 「正午」「昼」「食べる」「食う」)
+        - IMPORTANT: In wordBreakdown, use \(primaryLanguage) for "meaning" and "grammaticalRole" fields
+        - IMPORTANT: In grammarPoints, use \(primaryLanguage) for "meaning" and "explanation" fields
 
         ## Step 3: JSON Schema - Word Mode (MUST FOLLOW EXACTLY)
         {
@@ -319,67 +444,111 @@ public final class LLMClient {
         }
 
         ## 4) 句子解析模式 JSON 结构
+        Example for \(primaryLanguage) users:
         {
           "queryType": "sentence",
           "sentenceAnalysis": {
             "original": "今日は雨が降りそうです。",
             "translation": {
-              "chinese": "今天好像要下雨。",
-              "english": "It looks like it will rain today."
+              "chinese": "\(isChineseUser ? "今天好像要下雨。" : "It looks like it will rain today.")",
+              "english": "\(isChineseUser ? "It looks like it will rain today." : "今天好像要下雨。")"
             },
             "wordBreakdown": [
               {
                 "word": "今日",
                 "reading": "きょう",
-                "meaning": "今天",
-                "grammaticalRole": "時間名詞"
+                "meaning": "\(primaryLanguage == "English" ? "today" : "今天")",
+                "grammaticalRole": "\(primaryLanguage == "English" ? "time noun" : "時間名詞")"
               },
               {
                 "word": "は",
                 "reading": "は",
-                "meaning": "（主题标记）",
-                "grammaticalRole": "係助詞"
+                "meaning": "\(primaryLanguage == "English" ? "(topic marker)" : "（主题标记）")",
+                "grammaticalRole": "\(primaryLanguage == "English" ? "particle" : "係助詞")"
+              },
+              {
+                "word": "雨",
+                "reading": "あめ",
+                "meaning": "\(primaryLanguage == "English" ? "rain" : "雨")",
+                "grammaticalRole": "\(primaryLanguage == "English" ? "noun" : "名詞")"
               }
             ],
             "grammarPoints": [
               {
                 "pattern": "そうです",
                 "reading": "そうです",
-                "meaning": "样态推测",
-                "explanation": "表示根据外观或样子进行推测"
+                "meaning": "\(primaryLanguage == "English" ? "looks like; seems" : "样态推测")",
+                "explanation": "\(primaryLanguage == "English" ? "Expresses conjecture based on visual appearance or situation" : "表示根据外观或样子进行推测")"
+              }
+            ],
+            "examples": [
+              {
+                "japanese": "明日は晴れそうです。",
+                "chinese": "明天好像会晴天。",
+                "english": "It looks like it will be sunny tomorrow."
+              },
+              {
+                "japanese": "この本は面白そうです。",
+                "chinese": "这本书看起来很有趣。",
+                "english": "This book looks interesting."
               }
             ]
           }
         }
 
-        ## 5) 未収録模式 JSON 结构
+        CRITICAL: Use \(primaryLanguage) for "meaning", "grammaticalRole", and "explanation" fields in wordBreakdown and grammarPoints!
+
+        ## 5) 未収録模式 JSON 结构 - IMPORTANT: Provide internet-based explanation
+        When queryType is "notFound", you should:
+        1. Use your knowledge (including internet sources) to provide the best explanation
+        2. If it's a real Japanese word/phrase not in the dictionary, explain its meaning, usage, and origin
+        3. If it's a typo or non-existent word, suggest corrections and explain why
+        4. Provide definitions in BOTH Japanese and user's language (\(primaryLanguage))
+
+        Example for a word not in dictionary:
         {
           "queryType": "notFound",
           "entries": [
             {
-              "headword": "{输入原样}",
-              "reading": "(推定)",
-              "romaji": null,
-              "partOfSpeech": "未収録語",
+              "headword": "{input as-is}",
+              "reading": "{inferred reading in hiragana}",
+              "romaji": "{romaji if applicable}",
+              "partOfSpeech": "{inferred part of speech, or '未収録語' if unknown}",
+              "accent": null,
               "senses": [
                 {
-                  "definition": "語種：{和語/漢語/外来語(推定)}",
-                  "chinese": "未收录",
-                  "english": "Not found"
+                  "definition": "{Japanese explanation based on your knowledge}",
+                  "chinese": "{Chinese translation if primaryLanguage is Chinese}",
+                  "english": "{English explanation if primaryLanguage is English}"
                 }
               ],
-              "examples": [],
+              "grammar": null,
+              "examples": [
+                {
+                  "japanese": "{example sentence if known}",
+                  "chinese": "{Chinese translation}",
+                  "english": "{English translation}"
+                }
+              ],
               "related": {
-                "synonym": "{近义候选1／候选2}",
+                "synonym": "{similar words if any}",
                 "antonym": null,
-                "derived": null
+                "derived": "{possible corrections or related forms}"
               }
             }
           ]
         }
 
+        CRITICAL for notFound mode:
+        - DO NOT just return "未收录/Not found" - provide actual explanations from your knowledge
+        - If it's internet slang, explain its origin and meaning
+        - If it's a proper noun, explain what it refers to
+        - If it's a typo, suggest the correct form in "derived" field
+        - Use \(primaryLanguage) for all explanations
+
         ## MANDATORY REQUIREMENTS
         ⚠️ CRITICAL - Your response MUST be valid JSON ONLY. No explanations, no markdown, no prefix/suffix.
+        ⚠️ CRITICAL - Use ENGLISH punctuation ONLY in JSON structure: colons (:), commas (,), quotes ("). NEVER use Chinese punctuation (：、，、。).
         ⚠️ CRITICAL - ALL fields marked as required MUST be present. Use null for optional fields if empty.
         ⚠️ CRITICAL - Field names must match EXACTLY (case-sensitive): "headword", "reading", "romaji", "partOfSpeech", "accent", "senses", "grammar", "examples", "related"
 
@@ -458,23 +627,120 @@ public final class LLMClient {
           }
         }
 
+        ========================================
+        FINAL REMINDER FOR THIS REQUEST:
+        - User system language: \(primaryLanguage)
+        - ALL "meaning" fields in wordBreakdown: MUST be in \(primaryLanguage)
+        - ALL "grammaticalRole" fields in wordBreakdown: MUST be in \(primaryLanguage)
+        - ALL "meaning" fields in grammarPoints: MUST be in \(primaryLanguage)
+        - ALL "explanation" fields in grammarPoints: MUST be in \(primaryLanguage)
+
+        If \(primaryLanguage) is "English": use "money" not "钱", use "noun" not "名詞", use "particle" not "助詞"
+        If \(primaryLanguage) is "Chinese (Simplified)": use "钱" not "money", use "名詞" not "noun"
+        ========================================
+
         User Query: \(sentence)
 
         Response (JSON only, no other text):
         """
     }
 
+    private func buildExamplePrompt(entry: DictionaryEntry,
+                                    senses: [WordSense],
+                                    locale: String,
+                                    maxExamples: Int) -> String {
+        let definitions = senses.prefix(5)
+            .enumerated()
+            .map { index, sense in
+                let chinese = sense.definitionChineseSimplified ?? sense.definitionChineseTraditional ?? ""
+                return "\(index + 1). \(sense.definitionEnglish) | JP: \(sense.partOfSpeech) | CN: \(chinese)"
+            }
+            .joined(separator: "\n")
+
+        // Determine if user is Chinese speaker
+        let isChineseUser = locale.hasPrefix("zh")
+
+        // Build schema and instructions based on user's language
+        let jsonSchema: String
+        let translationInstruction: String
+
+        if isChineseUser {
+            // Chinese users: generate both chinese and english
+            let chineseType = locale.lowercased().contains("hant") ? "Traditional Chinese" : "Simplified Chinese"
+            jsonSchema = """
+            {"examples":[{"japanese":"...", "chinese":"...", "english":"..."}]}
+            """
+            translationInstruction = """
+            4. Use \(chineseType) for the chinese field. Keep english field in natural English.
+            """
+        } else {
+            // Non-Chinese users: only generate english (no chinese field)
+            jsonSchema = """
+            {"examples":[{"japanese":"...", "english":"..."}]}
+            """
+            translationInstruction = """
+            4. Keep english field in natural English. Do NOT include a chinese field.
+            """
+        }
+
+        return """
+        You are an expert Japanese language tutor. Generate natural example sentences for a dictionary entry.
+
+        Entry:
+        - Headword: \(entry.headword)
+        - Reading: \(entry.readingHiragana)
+        - Romaji: \(entry.readingRomaji)
+        - Core meanings:
+        \(definitions)
+
+        Requirements:
+        1. Produce up to \(maxExamples) concise Japanese sentences (<= 25 characters) that demonstrate the typical usage of the word. Each sentence MUST include the headword or its conjugated/inflected form once.
+        2. Provide context that matches the meanings listed above. Avoid uncommon idioms or archaic grammar.
+        3. Return JSON ONLY with schema:
+           \(jsonSchema)
+        \(translationInstruction)
+        5. Avoid romaji, avoid placeholders, avoid line breaks inside fields.
+
+        Respond with JSON only.
+        """
+    }
+
     // MARK: OpenAI 請求
     private func requestOpenAI(model: String, prompt: String) async throws -> LLMResult {
+        let content = try await requestOpenAIContent(model: model, prompt: prompt)
+
+        // 清洗 JSON：替换中文标点为英文标点
+        let cleanedContent = sanitizeJSON(content)
+
+        do {
+            return try JSONDecoder().decode(LLMResult.self, from: cleanedContent)
+        } catch let primaryError {
+            // Log the actual response for debugging
+            let responseText = String(data: cleanedContent, encoding: .utf8) ?? "Unable to decode response"
+            print("⚠️ Primary JSON Decode Failed. Attempting fallback parsing...")
+            print("📄 Response was: \(responseText)")
+            print("❌ Error: \(primaryError)")
+
+            // FALLBACK: Try to parse partial/malformed JSON
+            if let fallbackResult = tryFallbackParsing(content: cleanedContent, originalQuery: prompt) {
+                print("✅ Fallback parsing succeeded")
+                return fallbackResult
+            }
+
+            throw LLMError.decodeFailed("AI返回格式错误。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
+        }
+    }
+
+    private func requestOpenAIContent(model: String, prompt: String) async throws -> Data {
         guard let apiKey = apiKey else { throw LLMError.notConfigured }
 
         let url = URL(string: "https://api.openai.com/v1/chat/completions")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.timeoutInterval = 30  // 30秒超时（适应真机网络环境）
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
-        // 要求 JSON 輸出，降低字數
         let body: [String: Any] = [
             "model": model,
             "response_format": ["type": "json_object"],
@@ -493,7 +759,6 @@ public final class LLMClient {
             throw LLMError.httpError(http.statusCode, msg)
         }
 
-        // 解析 OpenAI 回傳
         struct Choice: Decodable { let message: Msg }
         struct Msg: Decodable { let content: String }
         struct OpenAIResp: Decodable { let choices: [Choice] }
@@ -502,32 +767,40 @@ public final class LLMClient {
         guard let content = decoded.choices.first?.message.content.data(using: .utf8) else {
             throw LLMError.emptyResponse
         }
-        do {
-            return try JSONDecoder().decode(LLMResult.self, from: content)
-        } catch let primaryError {
-            // Log the actual response for debugging
-            let responseText = String(data: content, encoding: .utf8) ?? "Unable to decode response"
-            print("⚠️ Primary JSON Decode Failed. Attempting fallback parsing...")
-            print("📄 Response was: \(responseText)")
-            print("❌ Error: \(primaryError)")
-
-            // FALLBACK: Try to parse partial/malformed JSON
-            if let fallbackResult = tryFallbackParsing(content: content, originalQuery: prompt) {
-                print("✅ Fallback parsing succeeded")
-                return fallbackResult
-            }
-
-            throw LLMError.decodeFailed("AI返回格式错误。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
-        }
+        return content
     }
 
     // MARK: Anthropic 請求（Claude）
     private func requestAnthropic(model: String, prompt: String) async throws -> LLMResult {
+        let content = try await requestAnthropicContent(model: model, prompt: prompt)
+
+        // 清洗 JSON：替换中文标点为英文标点
+        let cleanedContent = sanitizeJSON(content)
+
+        do {
+            return try JSONDecoder().decode(LLMResult.self, from: cleanedContent)
+        } catch let primaryError {
+            let responseText = String(data: cleanedContent, encoding: .utf8) ?? "Unable to decode response"
+            print("⚠️ Primary JSON Decode Failed (Anthropic). Attempting fallback parsing...")
+            print("📄 Response was: \(responseText)")
+            print("❌ Error: \(primaryError)")
+
+            if let fallbackResult = tryFallbackParsing(content: cleanedContent, originalQuery: prompt) {
+                print("✅ Fallback parsing succeeded")
+                return fallbackResult
+            }
+
+            throw LLMError.decodeFailed("AI返回格式错误 (Anthropic)。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
+        }
+    }
+
+    private func requestAnthropicContent(model: String, prompt: String) async throws -> Data {
         guard let apiKey = apiKey else { throw LLMError.notConfigured }
 
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.timeoutInterval = 10  // 10秒超时
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -551,30 +824,190 @@ public final class LLMClient {
             throw LLMError.httpError(http.statusCode, msg)
         }
 
-        // 解析 Claude 回傳
         struct Block: Decodable { let text: String? }
         struct Message: Decodable { let content: [Block] }
         let decoded = try JSONDecoder().decode(Message.self, from: data)
         let jsonText = decoded.content.compactMap { $0.text }.joined()
         guard let jsonData = jsonText.data(using: .utf8) else { throw LLMError.emptyResponse }
+        return jsonData
+    }
+
+    // MARK: Gemini 請求（Google）
+
+    // 非流式请求（保留用于兼容性）
+    private func requestGemini(model: String, prompt: String) async throws -> LLMResult {
+        let content = try await requestGeminiContent(model: model, prompt: prompt)
+
+        // 清洗 JSON：替换中文标点为英文标点
+        let cleanedContent = sanitizeJSON(content)
 
         do {
-            return try JSONDecoder().decode(LLMResult.self, from: jsonData)
+            let result = try JSONDecoder().decode(LLMResult.self, from: cleanedContent)
+            return result
         } catch let primaryError {
-            // Log the actual response for debugging
-            let responseText = String(data: jsonData, encoding: .utf8) ?? "Unable to decode response"
-            print("⚠️ Primary JSON Decode Failed (Anthropic). Attempting fallback parsing...")
-            print("📄 Response was: \(responseText)")
-            print("❌ Error: \(primaryError)")
+            // 备用解析
+            let responseText = String(data: cleanedContent, encoding: .utf8) ?? "无法解码"
+            print("⚠️ Gemini JSON解析失败")
+            print("原始响应: \(responseText.prefix(500))")
 
-            // FALLBACK: Try to parse partial/malformed JSON
-            if let fallbackResult = tryFallbackParsing(content: jsonData, originalQuery: prompt) {
-                print("✅ Fallback parsing succeeded")
-                return fallbackResult
-            }
-
-            throw LLMError.decodeFailed("AI返回格式错误 (Anthropic)。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
+            throw LLMError.decodeFailed("AI返回格式错误 (Gemini)。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
         }
+    }
+
+    // 流式请求（逐步返回结果）
+    private func requestGeminiStreaming(
+        model: String,
+        prompt: String,
+        onPartialResult: @escaping @Sendable (String) -> Void
+    ) async throws -> LLMResult {
+        guard let apiKey = apiKey else { throw LLMError.notConfigured }
+
+        print("🔵 Gemini Streaming: Starting request to \(model)")
+        print("📝 Prompt length: \(prompt.count) characters")
+        let requestStartTime = Date()
+
+        // Gemini Streaming API endpoint
+        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):streamGenerateContent?key=\(apiKey)&alt=sse")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 30
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "contents": [[
+                "parts": [[
+                    "text": "You must respond with valid JSON only, no markdown code blocks.\n\n\(prompt)"
+                ]]
+            ]],
+            "generationConfig": [
+                "temperature": 0.2,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json"
+            ]
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        print("🌐 Sending streaming request to Gemini...")
+        // 使用 URLSession 的 bytes 流式接收
+        let (bytes, response) = try await URLSession.shared.bytes(for: req)
+
+        let networkTime = Date().timeIntervalSince(requestStartTime)
+        print("✅ Network connection established in \(String(format: "%.2f", networkTime))s")
+
+        guard let http = response as? HTTPURLResponse else { throw LLMError.emptyResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw LLMError.httpError(http.statusCode, "Streaming request failed")
+        }
+
+        var accumulatedText = ""
+        var eventData = ""
+        var chunkCount = 0
+        let firstChunkTime = Date()
+
+        print("📡 Waiting for first chunk from Gemini...")
+        // 逐行读取 SSE (Server-Sent Events) 流
+        for try await line in bytes.lines {
+            if line.hasPrefix("data: ") {
+                eventData = String(line.dropFirst(6)) // 移除 "data: " 前缀
+
+                // 解析每个事件
+                if let data = eventData.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let candidates = json["candidates"] as? [[String: Any]],
+                   let firstCandidate = candidates.first,
+                   let content = firstCandidate["content"] as? [String: Any],
+                   let parts = content["parts"] as? [[String: Any]],
+                   let firstPart = parts.first,
+                   let text = firstPart["text"] as? String {
+
+                    accumulatedText += text
+                    chunkCount += 1
+
+                    if chunkCount == 1 {
+                        let ttfb = Date().timeIntervalSince(requestStartTime)
+                        print("⚡️ First chunk received in \(String(format: "%.2f", ttfb))s (TTFB)")
+                    }
+
+                    // 调用回调，通知 UI 更新
+                    await MainActor.run {
+                        onPartialResult(accumulatedText)
+                    }
+
+                    if chunkCount % 5 == 0 {  // 每5个chunk打印一次
+                        print("📦 Chunk #\(chunkCount): \(accumulatedText.count) chars total")
+                    }
+                }
+            }
+        }
+
+        let duration = Date().timeIntervalSince(requestStartTime)
+        print("✅ Streaming complete: \(chunkCount) chunks, \(accumulatedText.count) chars in \(String(format: "%.2f", duration))s")
+
+        // 解析最终的完整 JSON
+        guard let jsonData = accumulatedText.data(using: .utf8) else {
+            throw LLMError.emptyResponse
+        }
+
+        let cleanedContent = sanitizeJSON(jsonData)
+        let result = try JSONDecoder().decode(LLMResult.self, from: cleanedContent)
+        return result
+    }
+
+    private func requestGeminiContent(model: String, prompt: String) async throws -> Data {
+        guard let apiKey = apiKey else { throw LLMError.notConfigured }
+
+        print("🔵 Gemini API: Starting request to \(model)")
+        let requestStartTime = Date()
+
+        // Gemini API endpoint
+        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 30  // 30秒超时
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "contents": [[
+                "parts": [[
+                    "text": "You must respond with valid JSON only, no markdown code blocks.\n\n\(prompt)"
+                ]]
+            ]],
+            "generationConfig": [
+                "temperature": 0.2,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json"  // 强制 JSON 输出
+            ]
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        print("🔵 Gemini API: Request prepared, sending...")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let networkDuration = Date().timeIntervalSince(requestStartTime)
+        print("🔵 Gemini API: Network response received in \(String(format: "%.2f", networkDuration))s")
+        guard let http = resp as? HTTPURLResponse else { throw LLMError.emptyResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let msg = String(data: data, encoding: .utf8) ?? ""
+            throw LLMError.httpError(http.statusCode, msg)
+        }
+
+        // 解析 Gemini 响应格式
+        struct Part: Decodable { let text: String }
+        struct Content: Decodable { let parts: [Part] }
+        struct Candidate: Decodable { let content: Content }
+        struct GeminiResponse: Decodable { let candidates: [Candidate] }
+
+        let decoded = try JSONDecoder().decode(GeminiResponse.self, from: data)
+        guard let firstCandidate = decoded.candidates.first,
+              let jsonText = firstCandidate.content.parts.first?.text else {
+            throw LLMError.emptyResponse
+        }
+
+        guard let jsonData = jsonText.data(using: .utf8) else { throw LLMError.emptyResponse }
+        return jsonData
+    }
+
+    private struct ExampleResponse: Codable {
+        let examples: [LLMExample]
     }
 
     // MARK: Fallback Parsing
@@ -758,7 +1191,29 @@ public final class LLMClient {
 
     // MARK: 快取
     private func cacheKey(sentence: String, provider: LLMProvider, locale: String) -> String {
-        let raw = "\(sentence)|\(provider)|\(locale)|v1"
+        // v3: Enhanced notFound mode with internet-based explanations (2025-10-22)
+        let raw = "\(sentence)|\(providerIdentifier(provider))|\(locale)|v3"
+        let digest = Insecure.MD5.hash(data: raw.data(using: .utf8)!)
+        return digest.map { String(format: "%02hhx", $0) }.joined()
+    }
+
+    private func cacheKeyForExamples(entryID: Int,
+                                     provider: LLMProvider,
+                                     locale: String,
+                                     maxExamples: Int,
+                                     senses: [WordSense]) -> String {
+        let senseFingerprint = senses
+            .map { sense in
+                [
+                    sense.definitionEnglish,
+                    sense.definitionChineseSimplified ?? "",
+                    sense.definitionChineseTraditional ?? "",
+                    sense.partOfSpeech
+                ].joined(separator: "|")
+            }
+            .joined(separator: ";")
+
+        let raw = "examples|\(entryID)|\(senseFingerprint)|\(locale)|\(maxExamples)|\(providerIdentifier(provider))|v1"
         let digest = Insecure.MD5.hash(data: raw.data(using: .utf8)!)
         return digest.map { String(format: "%02hhx", $0) }.joined()
     }
@@ -767,7 +1222,7 @@ public final class LLMClient {
         diskCacheDir.appendingPathComponent("\(key).json")
     }
 
-    private func saveCache(_ value: LLMResult, for key: String) {
+    private func saveCache<T: Encodable>(_ value: T, for key: String) {
         let encoder = JSONEncoder()
         if let data = try? encoder.encode(value) {
             memCache.setObject(data as NSData, forKey: key as NSString)
@@ -785,5 +1240,97 @@ public final class LLMClient {
             return try? JSONDecoder().decode(T.self, from: data)
         }
         return nil
+    }
+
+    private func providerIdentifier(_ provider: LLMProvider) -> String {
+        switch provider {
+        case .openAI(let model):
+            return "openai:\(model)"
+        case .anthropic(let model):
+            return "anthropic:\(model)"
+        case .gemini(let model):
+            return "gemini:\(model)"
+        }
+    }
+
+    /// 清洗 JSON 数据：将中文标点替换为英文标点
+    /// Sanitize JSON data: replace Chinese punctuation with English punctuation
+    private func sanitizeJSON(_ data: Data) -> Data {
+        guard var jsonString = String(data: data, encoding: .utf8) else {
+            print("⚠️ Unable to decode JSON string")
+            return data
+        }
+
+        var replacementCount = 0
+
+        // 在 JSON 结构层面（字段名、冒号、逗号）替换中文标点为英文标点
+        // 但保留字符串值内部的标点（避免破坏日语/中文文本内容）
+
+        var insideString = false
+        var escaped = false
+        var result = ""
+
+        for char in jsonString {
+            if escaped {
+                // 转义字符后的字符，直接添加
+                result.append(char)
+                escaped = false
+                continue
+            }
+
+            if char == "\\" {
+                // 转义字符
+                escaped = true
+                result.append(char)
+                continue
+            }
+
+            if char == "\"" {
+                // 引号切换字符串状态
+                insideString.toggle()
+                result.append(char)
+                continue
+            }
+
+            // 在字符串外部（JSON 结构部分）替换中文标点
+            if !insideString {
+                switch char {
+                case "：":
+                    result.append(":")
+                    replacementCount += 1
+                case "，":
+                    result.append(",")
+                    replacementCount += 1
+                case "。":
+                    result.append(".")
+                    replacementCount += 1
+                case "｛":
+                    result.append("{")
+                    replacementCount += 1
+                case "｝":
+                    result.append("}")
+                    replacementCount += 1
+                case "［":
+                    result.append("[")
+                    replacementCount += 1
+                case "］":
+                    result.append("]")
+                    replacementCount += 1
+                default:
+                    result.append(char)
+                }
+            } else {
+                // 在字符串内部，保留原样（包括中文标点）
+                result.append(char)
+            }
+        }
+
+        if replacementCount > 0 {
+            print("🧹 JSON Sanitized: Replaced \(replacementCount) Chinese punctuation marks")
+            print("📝 Original: \(jsonString.prefix(200))...")
+            print("📝 Cleaned:  \(result.prefix(200))...")
+        }
+
+        return result.data(using: .utf8) ?? data
     }
 }

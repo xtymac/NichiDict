@@ -694,8 +694,8 @@ public final class LLMClient {
         \(definitions)
 
         Requirements:
-        1. Produce up to \(maxExamples) concise Japanese sentences (<= 25 characters) that demonstrate the typical usage of the word. Each sentence MUST include the headword or its conjugated/inflected form once.
-        2. Provide context that matches the meanings listed above. Avoid uncommon idioms or archaic grammar.
+        1. Produce up to \(maxExamples) natural Japanese sentences (20-30 characters) that demonstrate typical usage in daily life. Each sentence MUST include the headword or its conjugated/inflected form once.
+        2. Keep sentences simple and practical. Avoid uncommon idioms or archaic grammar.
         3. Return JSON ONLY with schema:
            \(jsonSchema)
         \(translationInstruction)

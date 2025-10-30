@@ -8,6 +8,7 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
     public let readingRomaji: String
     public let frequencyRank: Int?
     public let pitchAccent: String?
+    public let jlptLevel: String?
     public let createdAt: Int
     
     // Related data (not stored in table, loaded separately)
@@ -20,6 +21,7 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
         case readingRomaji = "reading_romaji"
         case frequencyRank = "frequency_rank"
         case pitchAccent = "pitch_accent"
+        case jlptLevel = "jlpt_level"
         case createdAt = "created_at"
     }
 
@@ -30,6 +32,7 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
         case readingRomaji = "reading_romaji"
         case frequencyRank = "frequency_rank"
         case pitchAccent = "pitch_accent"
+        case jlptLevel = "jlpt_level"
         case createdAt = "created_at"
         case senses
     }
@@ -47,6 +50,7 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
         readingRomaji: String,
         frequencyRank: Int?,
         pitchAccent: String?,
+        jlptLevel: String? = nil,
         createdAt: Int,
         senses: [WordSense] = []
     ) {
@@ -56,6 +60,7 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
         self.readingRomaji = readingRomaji
         self.frequencyRank = frequencyRank
         self.pitchAccent = pitchAccent
+        self.jlptLevel = jlptLevel
         self.createdAt = createdAt
         self.senses = senses
     }
@@ -69,6 +74,7 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
         readingRomaji = try container.decode(String.self, forKey: .readingRomaji)
         frequencyRank = try container.decodeIfPresent(Int.self, forKey: .frequencyRank)
         pitchAccent = try container.decodeIfPresent(String.self, forKey: .pitchAccent)
+        jlptLevel = try container.decodeIfPresent(String.self, forKey: .jlptLevel)
         createdAt = try container.decode(Int.self, forKey: .createdAt)
         senses = (try? container.decode([WordSense].self, forKey: .senses)) ?? []
     }

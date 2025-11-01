@@ -82,3 +82,7 @@ batch_generate_log_*.json
 batch_generation.log
 .batch_generate_state.json
 dict.db
+
+# API Configuration (contains secrets)
+NichiDict/Config.xcconfig
+Config.xcconfig

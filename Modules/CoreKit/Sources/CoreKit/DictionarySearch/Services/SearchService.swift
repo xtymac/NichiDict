@@ -111,6 +111,7 @@ public struct SearchService: SearchServiceProtocol {
                 limit: searchLimit
             )
             print("🔍 SearchService: Forward search returned \(dbResults.count) results")
+            print("🔍 DB returned (first 5): \(dbResults.prefix(5).map { "id=\($0.id) \($0.headword)" }.joined(separator: ", "))")
         }
         
         // Step 5: Classify match types and create SearchResults
@@ -121,11 +122,13 @@ public struct SearchService: SearchServiceProtocol {
                 scriptType: scriptType,
                 useReverseSearch: useReverseSearch
             )
+            let relevance = calculateRelevance(entry: entry, matchType: matchType, query: normalizedQuery)
+            print("🔍 Entry: id=\(entry.id) headword=\(entry.headword) reading=\(entry.readingHiragana) matchType=\(matchType) relevance=\(relevance) freqRank=\(entry.frequencyRank ?? 9999)")
             return SearchResult(
                 id: entry.id,
                 entry: entry,
                 matchType: matchType,
-                relevanceScore: calculateRelevance(entry: entry, matchType: matchType, query: normalizedQuery)
+                relevanceScore: relevance
             )
         }
         
@@ -139,12 +142,12 @@ public struct SearchService: SearchServiceProtocol {
                 if lhs.matchType != rhs.matchType {
                     return lhs.matchType < rhs.matchType
                 }
-                
+
                 // Secondary: Relevance score
                 if lhs.relevanceScore != rhs.relevanceScore {
                     return lhs.relevanceScore > rhs.relevanceScore
                 }
-                
+
                 // Tertiary: Frequency rank
                 let lhsRank = lhs.entry.frequencyRank ?? Int.max
                 let rhsRank = rhs.entry.frequencyRank ?? Int.max
@@ -161,7 +164,12 @@ public struct SearchService: SearchServiceProtocol {
                 return lhs.entry.id < rhs.entry.id
             }
         }
-        
+
+        print("🔍 Top 5 ranked results:")
+        for (index, result) in ranked.prefix(5).enumerated() {
+            print("  \(index+1). id=\(result.entry.id) headword=\(result.entry.headword) matchType=\(result.matchType) relevance=\(result.relevanceScore)")
+        }
+
         // Step 7: Limit to maxResults
         return Array(ranked.prefix(maxResults))
     }

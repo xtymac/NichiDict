@@ -86,3 +86,5 @@ dict.db
 # API Configuration (contains secrets)
 NichiDict/Config.xcconfig
 Config.xcconfig
+**/Resources/apikey.txt
+apikey.txt

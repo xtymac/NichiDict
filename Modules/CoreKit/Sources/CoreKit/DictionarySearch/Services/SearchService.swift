@@ -125,7 +125,7 @@ public struct SearchService: SearchServiceProtocol {
                 id: entry.id,
                 entry: entry,
                 matchType: matchType,
-                relevanceScore: calculateRelevance(entry: entry, matchType: matchType)
+                relevanceScore: calculateRelevance(entry: entry, matchType: matchType, query: normalizedQuery)
             )
         }
         
@@ -199,10 +199,18 @@ public struct SearchService: SearchServiceProtocol {
                 return .exact
             }
         default:
-            if entry.headword.lowercased() == lowercaseQuery ||
-               entry.readingHiragana.lowercased() == lowercaseQuery ||
-               entry.readingRomaji.lowercased() == lowercaseQuery {
+            // Headword exact match is the highest priority
+            if entry.headword.lowercased() == lowercaseQuery {
                 return .exact
+            }
+
+            // Reading-only match (homograph like 掏る when searching する)
+            // Treated as prefix to allow headword-prefix matches to rank higher
+            if entry.readingHiragana.lowercased() == lowercaseQuery ||
+               entry.readingRomaji.lowercased() == lowercaseQuery {
+                // If reading matches but headword doesn't, treat as prefix match
+                // This allows "すると" to potentially rank higher than "掏る"
+                return entry.headword.lowercased() == lowercaseQuery ? .exact : .prefix
             }
         }
 
@@ -224,10 +232,48 @@ public struct SearchService: SearchServiceProtocol {
         return .contains
     }
     
-    private func calculateRelevance(entry: DictionaryEntry, matchType: SearchResult.MatchType) -> Double {
+    private func calculateRelevance(entry: DictionaryEntry, matchType: SearchResult.MatchType, query: String) -> Double {
         let matchScore = Double(matchType.sortOrder * 1000)
         let freqScore = Double(10000 - (entry.frequencyRank ?? 9999))
-        return matchScore + freqScore
+
+        // JLPT bonus: prioritize common words (N5 > N4 > N3 > N2 > N1)
+        let jlptBonus: Double
+        switch entry.jlptLevel {
+        case "N5": jlptBonus = 5000  // Highest priority for beginner words
+        case "N4": jlptBonus = 4000
+        case "N3": jlptBonus = 3000
+        case "N2": jlptBonus = 2000
+        case "N1": jlptBonus = 1000
+        default: jlptBonus = 0
+        }
+
+        // Exact character match bonus: headword exactly matches query
+        // This prioritizes "する" (if it exists) over "掏る" when searching "する"
+        let exactHeadwordBonus: Double = (entry.headword.lowercased() == query.lowercased()) ? 10000 : 0
+
+        // Homograph penalty: reading matches but headword doesn't (同音異字)
+        // Balanced penalty: preserves JLPT/frequency weight while discouraging homographs
+        // Changed from -2000 to -1000 to maintain natural ranking (N5 > N4 for same match type)
+        let homographPenalty: Double = (entry.readingHiragana.lowercased() == query.lowercased() &&
+                                        entry.headword.lowercased() != query.lowercased()) ? -1000 : 0
+
+        // Prefix match bonus: headword starts with query
+        // Small bonus to distinguish grammar-type derivatives from reduplication
+        // Reduced from 500 to 200 to preserve JLPT ranking (N5 掏る > N4 すると)
+        let prefixBonus: Double = (entry.headword.lowercased().hasPrefix(query.lowercased()) &&
+                                   entry.headword.lowercased() != query.lowercased()) ? 200 : 0
+
+        // Length penalty: shorter words are more fundamental
+        // Penalize longer words to prioritize "する" over "すると"
+        let lengthPenalty = Double(entry.headword.count + entry.readingHiragana.count) * -10
+
+        // TODO: Multi-sense penalty (future optimization)
+        // Penalize entries with too many senses to avoid encyclopedia entries dominating results
+        // Example: "する（為る／為す）" with 50+ senses should rank lower than simple words
+        // Implementation note: Need to ensure senses are loaded or add sense_count field to DB
+        // let sensePenalty = Double(entry.senses.count > 10 ? -100 : 0)
+
+        return matchScore + freqScore + jlptBonus + exactHeadwordBonus + homographPenalty + prefixBonus + lengthPenalty
     }
 
     /// Sanitize query to prevent SQL injection and FTS5 syntax errors

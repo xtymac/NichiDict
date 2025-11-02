@@ -132,11 +132,11 @@ public struct LLMTranslation: Codable, Hashable {
 
 public struct LLMWordBreakdown: Codable, Hashable {
     public let word: String            // 词
-    public let reading: String         // 读音
+    public let reading: String?        // 读音（可选，如标点符号可能为null）
     public let meaning: String         // 词义
     public let grammaticalRole: String // 语法作用
 
-    public init(word: String, reading: String, meaning: String, grammaticalRole: String) {
+    public init(word: String, reading: String?, meaning: String, grammaticalRole: String) {
         self.word = word
         self.reading = reading
         self.meaning = meaning
@@ -848,7 +848,34 @@ public final class LLMClient {
             // 备用解析
             let responseText = String(data: cleanedContent, encoding: .utf8) ?? "无法解码"
             print("⚠️ Gemini JSON解析失败")
-            print("原始响应: \(responseText.prefix(500))")
+            print("========== FULL GEMINI RESPONSE ==========")
+            print(responseText)
+            print("==========================================")
+
+            // 打印详细的解码错误
+            if let decodingError = primaryError as? DecodingError {
+                print("🔍 Decoding Error Details:")
+                switch decodingError {
+                case .keyNotFound(let key, let context):
+                    print("   Missing key: \(key.stringValue)")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                case .valueNotFound(let type, let context):
+                    print("   Value not found for type: \(type)")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                case .typeMismatch(let type, let context):
+                    print("   Type mismatch for: \(type)")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                case .dataCorrupted(let context):
+                    print("   Data corrupted")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                @unknown default:
+                    print("   Unknown decoding error: \(decodingError)")
+                }
+            }
 
             throw LLMError.decodeFailed("AI返回格式错误 (Gemini)。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
         }
@@ -881,7 +908,7 @@ public final class LLMClient {
             ]],
             "generationConfig": [
                 "temperature": 0.2,
-                "maxOutputTokens": 2048,
+                "maxOutputTokens": 2048,  // Needs to be large enough for full sentence analysis
                 "responseMimeType": "application/json"
             ]
         ]
@@ -949,8 +976,44 @@ public final class LLMClient {
         }
 
         let cleanedContent = sanitizeJSON(jsonData)
-        let result = try JSONDecoder().decode(LLMResult.self, from: cleanedContent)
-        return result
+
+        do {
+            let result = try JSONDecoder().decode(LLMResult.self, from: cleanedContent)
+            return result
+        } catch let primaryError {
+            let responseText = String(data: cleanedContent, encoding: .utf8) ?? "无法解码"
+            print("⚠️ Gemini Streaming JSON解析失败")
+            print("========== FULL GEMINI STREAMING RESPONSE ==========")
+            print(responseText)
+            print("===================================================")
+
+            // 打印详细的解码错误
+            if let decodingError = primaryError as? DecodingError {
+                print("🔍 Decoding Error Details:")
+                switch decodingError {
+                case .keyNotFound(let key, let context):
+                    print("   Missing key: \(key.stringValue)")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                case .valueNotFound(let type, let context):
+                    print("   Value not found for type: \(type)")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                case .typeMismatch(let type, let context):
+                    print("   Type mismatch for: \(type)")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                case .dataCorrupted(let context):
+                    print("   Data corrupted")
+                    print("   Context: \(context.debugDescription)")
+                    print("   Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: " -> "))")
+                @unknown default:
+                    print("   Unknown decoding error: \(decodingError)")
+                }
+            }
+
+            throw LLMError.decodeFailed("AI返回格式错误 (Gemini Streaming)。\n原始响应: \(responseText.prefix(200))...\n错误: \(primaryError.localizedDescription)")
+        }
     }
 
     private func requestGeminiContent(model: String, prompt: String) async throws -> Data {
@@ -974,7 +1037,7 @@ public final class LLMClient {
             ]],
             "generationConfig": [
                 "temperature": 0.2,
-                "maxOutputTokens": 2048,
+                "maxOutputTokens": 2048,  // Needs to be large enough for full sentence analysis
                 "responseMimeType": "application/json"  // 强制 JSON 输出
             ]
         ]
@@ -993,7 +1056,10 @@ public final class LLMClient {
         // 解析 Gemini 响应格式
         struct Part: Decodable { let text: String }
         struct Content: Decodable { let parts: [Part] }
-        struct Candidate: Decodable { let content: Content }
+        struct Candidate: Decodable {
+            let content: Content
+            let finishReason: String?
+        }
         struct GeminiResponse: Decodable { let candidates: [Candidate] }
 
         let decoded = try JSONDecoder().decode(GeminiResponse.self, from: data)
@@ -1001,6 +1067,16 @@ public final class LLMClient {
               let jsonText = firstCandidate.content.parts.first?.text else {
             throw LLMError.emptyResponse
         }
+
+        // Check if response was complete
+        if let finishReason = firstCandidate.finishReason {
+            print("🔍 Gemini finishReason: \(finishReason)")
+            if finishReason != "STOP" && finishReason != "FINISH" {
+                print("⚠️ Warning: Response may be incomplete (finishReason: \(finishReason))")
+            }
+        }
+
+        print("📏 JSON text length: \(jsonText.count) characters")
 
         guard let jsonData = jsonText.data(using: .utf8) else { throw LLMError.emptyResponse }
         return jsonData

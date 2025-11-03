@@ -111,7 +111,20 @@ public struct SearchService: SearchServiceProtocol {
                 limit: searchLimit
             )
             print("🔍 SearchService: Forward search returned \(dbResults.count) results")
-            print("🔍 DB returned (first 5): \(dbResults.prefix(5).map { "id=\($0.id) \($0.headword)" }.joined(separator: ", "))")
+
+            // If no results and query ends with "する", try searching without "する"
+            // This handles suru-verbs like "勉強する" → "勉強"
+            if dbResults.isEmpty && normalizedQuery.hasSuffix("する") {
+                let baseQuery = String(normalizedQuery.dropLast(2)) // Remove "する"
+                if !baseQuery.isEmpty {
+                    print("🔍 SearchService: No results for '\(normalizedQuery)', trying base form '\(baseQuery)'")
+                    dbResults = try await dbService.searchEntries(
+                        query: baseQuery,
+                        limit: searchLimit
+                    )
+                    print("🔍 SearchService: Base form search returned \(dbResults.count) results")
+                }
+            }
         }
         
         // Step 5: Classify match types and create SearchResults
@@ -123,7 +136,6 @@ public struct SearchService: SearchServiceProtocol {
                 useReverseSearch: useReverseSearch
             )
             let relevance = calculateRelevance(entry: entry, matchType: matchType, query: normalizedQuery)
-            print("🔍 Entry: id=\(entry.id) headword=\(entry.headword) reading=\(entry.readingHiragana) matchType=\(matchType) relevance=\(relevance) freqRank=\(entry.frequencyRank ?? 9999)")
             return SearchResult(
                 id: entry.id,
                 entry: entry,
@@ -163,11 +175,6 @@ public struct SearchService: SearchServiceProtocol {
                 // Final fallback: stable ordering by id
                 return lhs.entry.id < rhs.entry.id
             }
-        }
-
-        print("🔍 Top 5 ranked results:")
-        for (index, result) in ranked.prefix(5).enumerated() {
-            print("  \(index+1). id=\(result.entry.id) headword=\(result.entry.headword) matchType=\(result.matchType) relevance=\(result.relevanceScore)")
         }
 
         // Step 7: Limit to maxResults

@@ -135,27 +135,32 @@ public struct SearchService: SearchServiceProtocol {
                 scriptType: scriptType,
                 useReverseSearch: useReverseSearch
             )
-            let relevance = calculateRelevance(entry: entry, matchType: matchType, query: normalizedQuery)
+            let (relevance, bucket) = calculateRelevanceAndBucket(
+                entry: entry,
+                matchType: matchType,
+                query: normalizedQuery
+            )
             return SearchResult(
                 id: entry.id,
                 entry: entry,
                 matchType: matchType,
-                relevanceScore: relevance
+                relevanceScore: relevance,
+                bucket: bucket
             )
         }
         
-        // Step 6: Rank results
+        // Step 6: Rank results (bucketed sorting: bucket first, then score)
         let ranked: [SearchResult]
         if useReverseSearch {
             ranked = searchResults
         } else {
             ranked = searchResults.sorted { lhs, rhs in
-                // Primary: Match type
-                if lhs.matchType != rhs.matchType {
-                    return lhs.matchType < rhs.matchType
+                // Primary: Bucket (A → B → C → D)
+                if lhs.bucket != rhs.bucket {
+                    return lhs.bucket < rhs.bucket
                 }
 
-                // Secondary: Relevance score
+                // Secondary: Relevance score (within bucket, descending)
                 if lhs.relevanceScore != rhs.relevanceScore {
                     return lhs.relevanceScore > rhs.relevanceScore
                 }
@@ -247,48 +252,191 @@ public struct SearchService: SearchServiceProtocol {
         return .contains
     }
     
-    private func calculateRelevance(entry: DictionaryEntry, matchType: SearchResult.MatchType, query: String) -> Double {
-        let matchScore = Double(matchType.sortOrder * 1000)
-        let freqScore = Double(10000 - (entry.frequencyRank ?? 9999))
+    /// Calculate relevance score and bucket using gentler scoring system (-20 to +100)
+    /// Returns: (relevanceScore, bucket)
+    private func calculateRelevanceAndBucket(
+        entry: DictionaryEntry,
+        matchType: SearchResult.MatchType,
+        query: String
+    ) -> (Double, SearchResult.ResultBucket) {
+        var score: Double = 0
+        let lowercaseQuery = query.lowercased()
+        let lowercaseHeadword = entry.headword.lowercased()
+        let lowercaseReading = entry.readingHiragana.lowercased()
 
-        // JLPT bonus: prioritize common words (N5 > N4 > N3 > N2 > N1)
-        let jlptBonus: Double
-        switch entry.jlptLevel {
-        case "N5": jlptBonus = 5000  // Highest priority for beginner words
-        case "N4": jlptBonus = 4000
-        case "N3": jlptBonus = 3000
-        case "N2": jlptBonus = 2000
-        case "N1": jlptBonus = 1000
-        default: jlptBonus = 0
+        // 1. Match type scoring (exact +80, prefix +15, contains +4)
+        let isExactHeadword = lowercaseHeadword == lowercaseQuery
+        let isLemmaMatch = lowercaseReading == lowercaseQuery && !isExactHeadword
+
+        if isExactHeadword {
+            score += 80
+        } else if isLemmaMatch {
+            score += 40
+        } else if matchType == .prefix {
+            score += 15
+        } else if matchType == .contains {
+            score += 4
         }
 
-        // Exact character match bonus: headword exactly matches query
-        // This prioritizes "する" (if it exists) over "掏る" when searching "する"
-        let exactHeadwordBonus: Double = (entry.headword.lowercased() == query.lowercased()) ? 10000 : 0
+        // 2. JLPT scoring (N5 +10, N4 +7, N3 +4, N2 +2)
+        switch entry.jlptLevel {
+        case "N5": score += 10
+        case "N4": score += 7
+        case "N3": score += 4
+        case "N2": score += 2
+        default: break
+        }
 
-        // Homograph penalty: reading matches but headword doesn't (同音異字)
-        // Balanced penalty: preserves JLPT/frequency weight while discouraging homographs
-        // Changed from -2000 to -1000 to maintain natural ranking (N5 > N4 for same match type)
-        let homographPenalty: Double = (entry.readingHiragana.lowercased() == query.lowercased() &&
-                                        entry.headword.lowercased() != query.lowercased()) ? -1000 : 0
+        // 3. Frequency scoring (JMdict frequency ranks)
+        if let frequencyRank = entry.frequencyRank {
+            if frequencyRank <= 10 {
+                score += 8  // news1/ichi1 equivalent
+            } else if frequencyRank <= 30 {
+                score += 5  // nf11-30
+            } else if frequencyRank <= 50 {
+                score += 2  // nf31-50
+            }
+        }
 
-        // Prefix match bonus: headword starts with query
-        // Small bonus to distinguish grammar-type derivatives from reduplication
-        // Reduced from 500 to 200 to preserve JLPT ranking (N5 掏る > N4 すると)
-        let prefixBonus: Double = (entry.headword.lowercased().hasPrefix(query.lowercased()) &&
-                                   entry.headword.lowercased() != query.lowercased()) ? 200 : 0
+        // 4. Part of speech bonus
+        // Basic adjectives/verbs: +5, Common noun phrases: +2
+        if let pos = entry.senses.first?.partOfSpeech {
+            if pos.contains("adj-i") || pos.contains("v1") || pos.contains("v5") {
+                score += 5  // Basic adjectives and verbs
+            } else if pos.contains("n") && !pos.contains("n-pr") {
+                score += 2  // Common nouns (not proper nouns)
+            }
+        }
 
-        // Length penalty: shorter words are more fundamental
-        // Penalize longer words to prioritize "する" over "すると"
-        let lengthPenalty = Double(entry.headword.count + entry.readingHiragana.count) * -10
+        // 5. Length penalty: max(0, lenRatio-1)*(-4), capped at -8
+        let lengthRatio = Double(entry.headword.count) / Double(max(query.count, 1))
+        if lengthRatio > 1.0 {
+            let penalty = min((lengthRatio - 1.0) * 4.0, 8.0)
+            score -= penalty
+        }
 
-        // TODO: Multi-sense penalty (future optimization)
-        // Penalize entries with too many senses to avoid encyclopedia entries dominating results
-        // Example: "する（為る／為す）" with 50+ senses should rank lower than simple words
-        // Implementation note: Need to ensure senses are loaded or add sense_count field to DB
-        // let sensePenalty = Double(entry.senses.count > 10 ? -100 : 0)
+        // 6. Phrase penalty: Only for [noun]+[particle]+[verb] patterns (-10)
+        // Note: 名詞+の+名詞 (noun+no+noun) is NOT penalized
+        let phrasePenalty = detectPhrasePenalty(headword: entry.headword, partOfSpeech: entry.senses.first?.partOfSpeech)
+        score += phrasePenalty
 
-        return matchScore + freqScore + jlptBonus + exactHeadwordBonus + homographPenalty + prefixBonus + lengthPenalty
+        // 7. Proper noun penalty: -12 if proper noun and not exact/lemma
+        if let pos = entry.senses.first?.partOfSpeech,
+           pos.contains("n-pr") && !isExactHeadword && !isLemmaMatch {
+            score -= 12
+        }
+
+        // 8. Common pattern bonus: 「〜の好き」「〜もの好き」etc. (+3 within C bucket)
+        // This helps natural phrases like「新しいもの好き」rank higher than specialized terms
+        let commonPatternBonus = detectCommonPatternBonus(
+            headword: entry.headword,
+            reading: entry.readingHiragana
+        )
+        score += commonPatternBonus
+
+        // Determine bucket
+        let bucket = determineBucket(
+            entry: entry,
+            matchType: matchType,
+            isExactHeadword: isExactHeadword,
+            isLemmaMatch: isLemmaMatch,
+            query: query
+        )
+
+        return (score, bucket)
+    }
+
+    /// Detect phrase patterns and return penalty
+    /// Only penalize [noun]+[particle]+[verb/suru-verb] patterns
+    private func detectPhrasePenalty(headword: String, partOfSpeech: String?) -> Double {
+        // Check for particles: を、に、で、が、と、へ、から、まで
+        let particles = ["を", "に", "で", "が", "へ", "から", "まで"]
+
+        for particle in particles {
+            if headword.contains(particle) {
+                // Check if this looks like [noun]+[particle]+[verb] pattern
+                // Simple heuristic: if headword contains particle and has verb-like ending
+                // This is a conservative check to avoid false positives
+                let verbEndings = ["る", "く", "す", "つ", "ぬ", "ぶ", "む", "う"]
+                if verbEndings.contains(where: { headword.hasSuffix($0) }) {
+                    return -10
+                }
+            }
+        }
+
+        // "と" particle needs special handling (can be part of quotations)
+        if headword.contains("と") {
+            // If it contains と and looks like a verb phrase
+            if headword.hasSuffix("する") || headword.hasSuffix("言う") {
+                return -10
+            }
+        }
+
+        return 0
+    }
+
+    /// Detect common natural patterns that should rank higher
+    /// Examples: 新しいもの好き、読書好き (patterns ending in 好き/zuki)
+    private func detectCommonPatternBonus(headword: String, reading: String) -> Double {
+        // Pattern 1: 〜の好き (explicit の particle)
+        if headword.contains("の") && headword.hasSuffix("好き") {
+            return 3
+        }
+
+        // Pattern 2: 〜もの好き / 物好き / 者好き (implicit の, common writings)
+        if headword.hasSuffix("もの好き") || headword.hasSuffix("物好き") || headword.hasSuffix("者好き") {
+            return 3
+        }
+
+        // Pattern 3: Reading-based fallback for 〜ずき (…zuki)
+        // This catches variants where kanji is used for the modified noun
+        // e.g., 新しいもの好き might have reading ending in ずき
+        if reading.hasSuffix("ずき") && !headword.contains("の") {
+            // Only apply if it's likely a compound (longer than just the standalone 好き)
+            if headword.count > 2 && headword.hasSuffix("好き") {
+                return 3
+            }
+        }
+
+        return 0
+    }
+
+    /// Determine which bucket this result belongs to
+    private func determineBucket(
+        entry: DictionaryEntry,
+        matchType: SearchResult.MatchType,
+        isExactHeadword: Bool,
+        isLemmaMatch: Bool,
+        query: String
+    ) -> SearchResult.ResultBucket {
+        // A bucket: Exact match or lemma match
+        if isExactHeadword || isLemmaMatch {
+            return .exactMatch
+        }
+
+        // B bucket: Prefix match + high frequency
+        // High frequency = JMdict news1|ichi1|nf≤30 OR has JLPT level
+        if matchType == .prefix {
+            let hasHighFrequency = (entry.frequencyRank ?? Int.max) <= 30
+            let hasJLPT = entry.jlptLevel != nil
+
+            if hasHighFrequency || hasJLPT {
+                return .commonPrefixMatch
+            }
+        }
+
+        // D bucket: Specialized terms (proper nouns, no JLPT, long)
+        let isProperNoun = entry.senses.first?.partOfSpeech.contains("n-pr") ?? false
+        let isSpecialized = entry.jlptLevel == nil &&
+                           entry.frequencyRank == nil &&
+                           entry.headword.count > 4
+
+        if isProperNoun || isSpecialized {
+            return .specializedTerm
+        }
+
+        // C bucket: Everything else (general match)
+        return .generalMatch
     }
 
     /// Sanitize query to prevent SQL injection and FTS5 syntax errors

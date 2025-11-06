@@ -308,6 +308,47 @@ public struct SearchService: SearchServiceProtocol {
             }
         }
 
+        // 4.5. Suffix pattern bonus: X+嫌い, X+好き (common suffix compounds)
+        // e.g., 大嫌い, 人嫌い, 本好き, etc.
+        // These are natural compound nouns that should rank higher than grammar forms
+        var hasSuffixPattern = false
+        if !isExactHeadword && !isLemmaMatch {
+            // Check if entry ends with common adjective suffixes
+            let commonSuffixes = ["嫌い", "ぎらい", "好き", "ずき"]
+            for suffix in commonSuffixes {
+                if entry.headword.hasSuffix(suffix) && entry.headword != suffix && entry.headword.count > suffix.count {
+                    score += 8  // Suffix pattern bonus (increased to prioritize compounds over grammar forms)
+                    hasSuffixPattern = true
+                    break
+                }
+            }
+        }
+
+        // 4.6. Common word whitelist (high-frequency suffix compounds)
+        // Priority order: 大嫌い > 人嫌い > others
+        // These boost common compounds above grammar forms like 嫌いなく
+        if entry.headword == "大嫌い" {
+            score += 8  // Highest priority (most common in textbooks)
+        } else if entry.headword == "人嫌い" {
+            score += 6  // High priority
+        } else {
+            let commonWords = ["食わず嫌い", "大好き", "読書好き"]
+            if commonWords.contains(entry.headword) {
+                score += 6  // Extra boost for other common compounds
+            }
+        }
+
+        // 4.7. Rare single-kanji prefix penalty
+        // Single kanji + 嫌い compounds without frequency data are likely uncommon
+        // e.g., "出嫌い" should rank lower than "大嫌い"
+        if hasSuffixPattern && entry.frequencyRank == nil {
+            // Check if it's a single-kanji prefix (e.g., "出嫌い" = 1 kanji + 嫌い)
+            let kanjiCount = entry.headword.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
+            if kanjiCount == 1 {
+                score -= 6  // Penalize rare single-kanji compounds
+            }
+        }
+
         // 8. Common pattern bonus: 「〜の好き」「〜もの好き」etc. (+5, applied early)
         // This helps natural phrases like「新しいもの好き」rank higher than specialized terms
         let commonPatternBonus = detectCommonPatternBonus(
@@ -347,17 +388,55 @@ public struct SearchService: SearchServiceProtocol {
             score -= 12
         }
 
-        // 8. Compound word penalty for prefix/contains matches
-        // Detect compound words like "嫌い箸" (kirai-bashi) when searching for "嫌い"
-        // If the entry is longer than query and contains the query as a prefix,
-        // check if the remaining part is a separate word (compound)
-        if !isExactHeadword && !isLemmaMatch && entry.headword.count > query.count {
-            let extraLength = entry.headword.count - query.count
-            // If extra length >= 1 and entry is not a common pattern, apply compound penalty
-            // This penalizes "嫌い箸" (3 chars) when searching "嫌い" (2 chars)
-            if extraLength >= 1 && !hasCommonPattern {
-                let compoundPenalty = Double(extraLength) * 3.0  // -3 per extra character
-                score -= compoundPenalty
+        // 8. Intent-aware compound word penalty (CRITICAL for filtering unrelated compounds)
+        // Detect query intent and apply stricter penalties for compounds
+        let queryIsAdjective = query.hasSuffix("い") && query.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+
+        if !isExactHeadword && !isLemmaMatch && entry.headword.count > query.count && !hasCommonPattern {
+            // Check if entry starts with query (e.g., "嫌い箸" starts with "嫌い")
+            if lowercaseHeadword.hasPrefix(lowercaseQuery) {
+                let suffixStartIndex = entry.headword.index(entry.headword.startIndex, offsetBy: query.count)
+                let suffix = String(entry.headword[suffixStartIndex...])
+
+                if !suffix.isEmpty {
+                    let firstChar = suffix.first!
+                    let firstScalar = firstChar.unicodeScalars.first!
+
+                    // Valid grammar suffixes for adjectives (な-adjectives)
+                    let validSuffixes = ["な", "に", "だ", "です", "じゃ", "じゃない", "でも", "だった", "では", "なら", "さ", "なく"]
+                    let isValidSuffix = validSuffixes.contains { suffix.hasPrefix($0) }
+
+                    // Rule 2: Heavy penalty if query is followed by kanji (compound noun)
+                    // e.g., "嫌い箸" - the "箸" is a separate word
+                    if (0x4E00...0x9FFF).contains(firstScalar.value) {
+                        // Kanji after query = compound noun, NOT a grammatical variant
+                        score -= 15  // Heavy penalty: -15
+                    }
+                    // Rule 3: Light penalty if followed by hiragana but NOT a valid suffix
+                    else if (0x3040...0x309F).contains(firstScalar.value) && !isValidSuffix {
+                        score -= 8  // Medium penalty: -8
+                    }
+                    // Valid suffix: give grammar bonus (reduced to prioritize common compounds)
+                    else if isValidSuffix {
+                        score += 2  // Grammar variant bonus (reduced from 3 to let compounds rank higher)
+                    }
+                }
+            }
+
+            // Rule 4: Kanji match bonus/penalty
+            // If query contains kanji, prioritize entries with same kanji
+            let queryKanji = Set(query.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) })
+            if !queryKanji.isEmpty {
+                let entryKanji = Set(entry.headword.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) })
+                let sharedKanji = queryKanji.intersection(entryKanji)
+
+                if sharedKanji == queryKanji {
+                    // Entry contains all query kanji: bonus
+                    score += 6
+                } else if sharedKanji.isEmpty {
+                    // No shared kanji (e.g., 機雷 vs 嫌い): heavy penalty
+                    score -= 12
+                }
             }
         }
 
@@ -373,6 +452,9 @@ public struct SearchService: SearchServiceProtocol {
         // Debug logging for ranking issues
         if entry.headword.contains("新しい") && entry.headword != "新しい" {
             print("📊 Scoring '\(entry.headword)': score=\(score), bucket=\(bucket), bonus=\(commonPatternBonus), len=\(entry.headword.count)")
+        }
+        if entry.headword.contains("嫌い") {
+            print("📊 嫌い Scoring '\(entry.headword)': score=\(score), bucket=\(bucket), matchType=\(matchType)")
         }
 
         return (score, bucket)

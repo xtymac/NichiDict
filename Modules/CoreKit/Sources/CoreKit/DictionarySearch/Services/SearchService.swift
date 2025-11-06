@@ -308,10 +308,31 @@ public struct SearchService: SearchServiceProtocol {
             }
         }
 
+        // 8. Common pattern bonus: 「〜の好き」「〜もの好き」etc. (+5, applied early)
+        // This helps natural phrases like「新しいもの好き」rank higher than specialized terms
+        let commonPatternBonus = detectCommonPatternBonus(
+            headword: entry.headword,
+            reading: entry.readingHiragana
+        )
+        let hasCommonPattern = commonPatternBonus > 0
+        score += commonPatternBonus
+
         // 5. Length penalty: max(0, lenRatio-1)*(-4), capped at -8
+        // For common patterns (〜好き), apply reduced penalty (half)
+        // For contains matches, apply STRONGER penalty to suppress compound words
         let lengthRatio = Double(entry.headword.count) / Double(max(query.count, 1))
         if lengthRatio > 1.0 {
-            let penalty = min((lengthRatio - 1.0) * 4.0, 8.0)
+            let basePenaltyMultiplier: Double
+            if matchType == .contains {
+                // Contains matches get 2x stronger length penalty
+                // e.g., searching "嫌い" (2 chars), "嫌い箸" (3 chars) gets -4 instead of -2
+                basePenaltyMultiplier = 8.0
+            } else {
+                basePenaltyMultiplier = 4.0
+            }
+
+            let basePenalty = min((lengthRatio - 1.0) * basePenaltyMultiplier, 16.0)
+            let penalty = hasCommonPattern ? basePenalty * 0.5 : basePenalty
             score -= penalty
         }
 
@@ -326,13 +347,19 @@ public struct SearchService: SearchServiceProtocol {
             score -= 12
         }
 
-        // 8. Common pattern bonus: 「〜の好き」「〜もの好き」etc. (+3 within C bucket)
-        // This helps natural phrases like「新しいもの好き」rank higher than specialized terms
-        let commonPatternBonus = detectCommonPatternBonus(
-            headword: entry.headword,
-            reading: entry.readingHiragana
-        )
-        score += commonPatternBonus
+        // 8. Compound word penalty for prefix/contains matches
+        // Detect compound words like "嫌い箸" (kirai-bashi) when searching for "嫌い"
+        // If the entry is longer than query and contains the query as a prefix,
+        // check if the remaining part is a separate word (compound)
+        if !isExactHeadword && !isLemmaMatch && entry.headword.count > query.count {
+            let extraLength = entry.headword.count - query.count
+            // If extra length >= 1 and entry is not a common pattern, apply compound penalty
+            // This penalizes "嫌い箸" (3 chars) when searching "嫌い" (2 chars)
+            if extraLength >= 1 && !hasCommonPattern {
+                let compoundPenalty = Double(extraLength) * 3.0  // -3 per extra character
+                score -= compoundPenalty
+            }
+        }
 
         // Determine bucket
         let bucket = determineBucket(
@@ -342,6 +369,11 @@ public struct SearchService: SearchServiceProtocol {
             isLemmaMatch: isLemmaMatch,
             query: query
         )
+
+        // Debug logging for ranking issues
+        if entry.headword.contains("新しい") && entry.headword != "新しい" {
+            print("📊 Scoring '\(entry.headword)': score=\(score), bucket=\(bucket), bonus=\(commonPatternBonus), len=\(entry.headword.count)")
+        }
 
         return (score, bucket)
     }
@@ -380,12 +412,12 @@ public struct SearchService: SearchServiceProtocol {
     private func detectCommonPatternBonus(headword: String, reading: String) -> Double {
         // Pattern 1: 〜の好き (explicit の particle)
         if headword.contains("の") && headword.hasSuffix("好き") {
-            return 3
+            return 5
         }
 
         // Pattern 2: 〜もの好き / 物好き / 者好き (implicit の, common writings)
         if headword.hasSuffix("もの好き") || headword.hasSuffix("物好き") || headword.hasSuffix("者好き") {
-            return 3
+            return 5
         }
 
         // Pattern 3: Reading-based fallback for 〜ずき (…zuki)
@@ -394,7 +426,7 @@ public struct SearchService: SearchServiceProtocol {
         if reading.hasSuffix("ずき") && !headword.contains("の") {
             // Only apply if it's likely a compound (longer than just the standalone 好き)
             if headword.count > 2 && headword.hasSuffix("好き") {
-                return 3
+                return 5
             }
         }
 
@@ -425,17 +457,25 @@ public struct SearchService: SearchServiceProtocol {
             }
         }
 
+        // Check if this is a common pattern (〜の好き, 〜もの好き, etc.)
+        // These should be in C bucket, not D bucket (specialized terms)
+        let hasCommonPattern = detectCommonPatternBonus(
+            headword: entry.headword,
+            reading: entry.readingHiragana
+        ) > 0
+
         // D bucket: Specialized terms (proper nouns, no JLPT, long)
+        // BUT: Exclude common patterns like 〜もの好き
         let isProperNoun = entry.senses.first?.partOfSpeech.contains("n-pr") ?? false
         let isSpecialized = entry.jlptLevel == nil &&
                            entry.frequencyRank == nil &&
                            entry.headword.count > 4
 
-        if isProperNoun || isSpecialized {
+        if !hasCommonPattern && (isProperNoun || isSpecialized) {
             return .specializedTerm
         }
 
-        // C bucket: Everything else (general match)
+        // C bucket: Everything else (general match + common patterns)
         return .generalMatch
     }
 

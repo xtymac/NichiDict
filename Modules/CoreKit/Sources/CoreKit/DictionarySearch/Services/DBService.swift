@@ -54,16 +54,18 @@ public struct DBService: DBServiceProtocol {
 
             var entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: [query, query, query, query, query, ftsQuery, limit])
 
-            // Collect all readings to find variants
-            var allReadings = Set<String>()
-            for entry in entries {
-                allReadings.insert(entry.readingHiragana)
+            // Only find reading-based variants if query is pure hiragana/katakana (reading search)
+            // This prevents showing unrelated homonyms when searching with kanji
+            // e.g., searching "元気" should not show "原器", "衡気", etc.
+            var existingIds = Set(entries.map { $0.id })
+            let isPureKanaQuery = query.unicodeScalars.allSatisfy { scalar in
+                // Hiragana range: U+3040 - U+309F
+                // Katakana range: U+30A0 - U+30FF
+                (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
             }
 
-            // Find all variants with the same readings, with proper ordering
-            var existingIds = Set(entries.map { $0.id })
-            if !allReadings.isEmpty {
-                let placeholders = allReadings.map { _ in "?" }.joined(separator: ",")
+            if isPureKanaQuery {
+                // For pure kana queries (e.g., "げんき"), find all kanji variants
                 let variantsSql = """
                 SELECT DISTINCT e.*,
                     CASE
@@ -72,18 +74,14 @@ public struct DBService: DBServiceProtocol {
                         ELSE 2
                     END AS variant_priority
                 FROM dictionary_entries e
-                WHERE e.reading_hiragana IN (\(placeholders))
+                WHERE e.reading_hiragana = ?
                 ORDER BY
                     variant_priority ASC,
                     COALESCE(e.frequency_rank, 999999) ASC,
                     LENGTH(e.headword) ASC
                 """
 
-                // Build arguments: query twice for priority check, then all readings
-                var variantArgs: [DatabaseValueConvertible] = [query, query]
-                variantArgs.append(contentsOf: allReadings.map { $0 as DatabaseValueConvertible })
-
-                let variantEntries = try DictionaryEntry.fetchAll(db, sql: variantsSql, arguments: StatementArguments(variantArgs))
+                let variantEntries = try DictionaryEntry.fetchAll(db, sql: variantsSql, arguments: [query, query, query])
 
                 // Add variants not already in results
                 var allEntries = entries

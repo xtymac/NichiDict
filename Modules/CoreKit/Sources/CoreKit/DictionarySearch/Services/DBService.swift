@@ -61,6 +61,7 @@ public struct DBService: DBServiceProtocol {
             }
 
             // Find all variants with the same readings, with proper ordering
+            var existingIds = Set(entries.map { $0.id })
             if !allReadings.isEmpty {
                 let placeholders = allReadings.map { _ in "?" }.joined(separator: ",")
                 let variantsSql = """
@@ -84,13 +85,101 @@ public struct DBService: DBServiceProtocol {
 
                 let variantEntries = try DictionaryEntry.fetchAll(db, sql: variantsSql, arguments: StatementArguments(variantArgs))
 
-                // Replace entries with sorted variants (maintains proper order)
-                let existingIds = Set(entries.map { $0.id })
+                // Add variants not already in results
                 var allEntries = entries
                 for variant in variantEntries where !existingIds.contains(variant.id) {
                     allEntries.append(variant)
+                    existingIds.insert(variant.id)
                 }
                 entries = allEntries
+            }
+
+            // Add contains matches (e.g., "頭が古い" when searching "古い")
+            // Only add if we haven't hit the limit yet
+            // Exclude entries already matched by FTS prefix search (both headword and reading)
+            // Limit to words not much longer than query to avoid distant compound words
+            if entries.count < limit {
+                print("🔍 DBService: Adding contains matches. Current count: \(entries.count), limit: \(limit)")
+
+                // Calculate max length: query + 3 characters
+                // e.g., searching "嫌い" (2 chars) allows up to 5 chars
+                // This filters out long compounds like "嫌い箸使い方" but keeps "嫌いなく"
+                let maxLength = query.count + 3
+
+                let containsSql = """
+                SELECT DISTINCT e.*
+                FROM dictionary_entries e
+                WHERE (e.headword LIKE '%' || ? || '%' OR e.reading_hiragana LIKE '%' || ? || '%')
+                  AND e.headword NOT LIKE ? || '%'
+                  AND e.reading_hiragana NOT LIKE ? || '%'
+                  AND LENGTH(e.headword) <= ?
+                ORDER BY
+                    COALESCE(e.frequency_rank, 999999) ASC,
+                    LENGTH(e.headword) ASC
+                LIMIT ?
+                """
+
+                let containsEntries = try DictionaryEntry.fetchAll(db, sql: containsSql, arguments: [query, query, query, query, maxLength, limit - entries.count])
+                print("🔍 DBService: Contains query found \(containsEntries.count) entries (max length: \(maxLength))")
+
+                // Add contains matches not already in results
+                var addedCount = 0
+                for entry in containsEntries where !existingIds.contains(entry.id) {
+                    entries.append(entry)
+                    existingIds.insert(entry.id)
+                    addedCount += 1
+                }
+                print("🔍 DBService: Added \(addedCount) new contains entries. Total now: \(entries.count)")
+            }
+
+            // Add kanji-based matches for compound words (e.g., "安物", "安売り" when searching "安い")
+            // Extract kanji from query and find short words starting with that kanji
+            // ONLY match words with similar readings to avoid unrelated words
+            if entries.count < limit {
+                let kanjiChars = query.unicodeScalars.filter { scalar in
+                    // Check if character is in CJK Unified Ideographs range
+                    (0x4E00...0x9FFF).contains(scalar.value)
+                }
+
+                let hiraganaChars = query.unicodeScalars.filter { scalar in
+                    (0x3040...0x309F).contains(scalar.value)  // Hiragana range
+                }
+
+                // Only run kanji-based search if query contains BOTH kanji AND hiragana
+                // This ensures "安い" triggers it but "安心" doesn't
+                if !kanjiChars.isEmpty && !hiraganaChars.isEmpty {
+                    let firstKanji = String(kanjiChars.prefix(1))
+                    let readingPrefix = String(hiraganaChars.prefix(2))
+
+                    print("🔍 DBService: Adding kanji-based matches for '\(firstKanji)' with reading '\(readingPrefix)*'. Current count: \(entries.count)")
+
+                    // CRITICAL: Filter by reading prefix to exclude unrelated words
+                    // e.g., when searching "安い" (やすい), only match "安物" (やすもの),
+                    // NOT "安心" (あんしん) or "安全" (あんぜん)
+                    let kanjiSql = """
+                    SELECT DISTINCT e.*
+                    FROM dictionary_entries e
+                    WHERE e.headword LIKE ? || '%'
+                      AND e.headword != ?
+                      AND e.reading_hiragana LIKE ? || '%'
+                      AND LENGTH(e.headword) <= 4
+                    ORDER BY
+                        LENGTH(e.headword) ASC,
+                        COALESCE(e.frequency_rank, 999999) ASC
+                    LIMIT ?
+                    """
+
+                    let kanjiEntries = try DictionaryEntry.fetchAll(db, sql: kanjiSql, arguments: [firstKanji, query, readingPrefix, limit - entries.count])
+                    print("🔍 DBService: Kanji query found \(kanjiEntries.count) entries")
+
+                    var kanjiAddedCount = 0
+                    for entry in kanjiEntries where !existingIds.contains(entry.id) {
+                        entries.append(entry)
+                        existingIds.insert(entry.id)
+                        kanjiAddedCount += 1
+                    }
+                    print("🔍 DBService: Added \(kanjiAddedCount) new kanji-based entries. Total now: \(entries.count)")
+                }
             }
 
             // Load senses for each entry

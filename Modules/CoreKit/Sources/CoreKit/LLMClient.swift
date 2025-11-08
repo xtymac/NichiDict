@@ -19,10 +19,11 @@ public struct LLMDictEntry: Codable, Hashable {
     public let grammar: LLMGrammar?       // 文法・用法
     public let examples: [LLMExample]?    // 用例（可选）
     public let related: LLMRelated?       // 関連語
+    public var jlptLevel: String?         // JLPT级别（从本地数据库查询后补充）
 
     public init(headword: String, reading: String, romaji: String?, partOfSpeech: String,
                 accent: String?, senses: [LLMSense], grammar: LLMGrammar?,
-                examples: [LLMExample]?, related: LLMRelated?) {
+                examples: [LLMExample]?, related: LLMRelated?, jlptLevel: String? = nil) {
         self.headword = headword
         self.reading = reading
         self.romaji = romaji
@@ -32,6 +33,7 @@ public struct LLMDictEntry: Codable, Hashable {
         self.grammar = grammar
         self.examples = examples
         self.related = related
+        self.jlptLevel = jlptLevel
     }
 }
 

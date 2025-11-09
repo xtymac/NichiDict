@@ -6,6 +6,24 @@ public struct SearchResult: Identifiable, Hashable, Sendable {
     public let matchType: MatchType
     public let relevanceScore: Double
     public let bucket: ResultBucket  // 分桶排序
+    public let groupType: GroupType  // 装饰性分组（不影响排序）
+
+    // 装饰性分组：用于视觉组织，不影响得分排序
+    public enum GroupType: String, Codable, Sendable {
+        case basicWord      // 基本词: 完全匹配
+        case commonPhrase   // 常用表达: JLPT或频率≤200
+        case derivative     // 衍生词: 有频率但>200
+        case other          // 其他: 无频率数据
+
+        public var displayName: String {
+            switch self {
+            case .basicWord: return "基本词"
+            case .commonPhrase: return "常用表达"
+            case .derivative: return "衍生词"
+            case .other: return "其他"
+            }
+        }
+    }
 
     public enum MatchType: String, Codable, Comparable, Sendable {
         case exact, prefix, contains
@@ -35,11 +53,12 @@ public struct SearchResult: Identifiable, Hashable, Sendable {
         }
     }
 
-    public init(id: Int, entry: DictionaryEntry, matchType: MatchType, relevanceScore: Double, bucket: ResultBucket) {
+    public init(id: Int, entry: DictionaryEntry, matchType: MatchType, relevanceScore: Double, bucket: ResultBucket, groupType: GroupType) {
         self.id = id
         self.entry = entry
         self.matchType = matchType
         self.relevanceScore = relevanceScore
         self.bucket = bucket
+        self.groupType = groupType
     }
 }

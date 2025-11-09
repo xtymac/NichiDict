@@ -287,14 +287,23 @@ public struct SearchService: SearchServiceProtocol {
         default: break
         }
 
-        // 3. Frequency scoring (JMdict frequency ranks)
+        // 3. Frequency scoring (JMdict frequency ranks + Wikipedia)
+        // IMPORTANT: Frequency scores must be high enough to prioritize ANY word with frequency
+        // over words without frequency (which might get +2 from noun POS or +5 from adjective POS)
+        // Minimum frequency bonus is +3 to ensure it beats noun(+2) and adjective(+5) bonuses
         if let frequencyRank = entry.frequencyRank {
             if frequencyRank <= 10 {
-                score += 8  // news1/ichi1 equivalent
+                score += 12  // news1/ichi1 equivalent (highest priority)
             } else if frequencyRank <= 30 {
-                score += 5  // nf11-30
+                score += 9  // nf11-30
             } else if frequencyRank <= 50 {
-                score += 2  // nf31-50
+                score += 7  // nf31-50
+            } else if frequencyRank <= 200 {
+                score += 5  // Medium frequency (JMdict tier 2 + Wikipedia high freq)
+            } else if frequencyRank <= 1000 {
+                score += 4  // Low frequency
+            } else if frequencyRank <= 5000 {
+                score += 3  // Very low frequency (still beats noun/adjective bonuses)
             }
         }
 
@@ -359,7 +368,7 @@ public struct SearchService: SearchServiceProtocol {
         score += commonPatternBonus
 
         // 5. Length penalty: max(0, lenRatio-1)*(-4), capped at -8
-        // For common patterns (〜好き), apply reduced penalty (half)
+        // For common patterns (〜好き) or high-frequency words, apply reduced penalty
         // For contains matches, apply STRONGER penalty to suppress compound words
         let lengthRatio = Double(entry.headword.count) / Double(max(query.count, 1))
         if lengthRatio > 1.0 {
@@ -373,7 +382,11 @@ public struct SearchService: SearchServiceProtocol {
             }
 
             let basePenalty = min((lengthRatio - 1.0) * basePenaltyMultiplier, 16.0)
-            let penalty = hasCommonPattern ? basePenalty * 0.5 : basePenalty
+
+            // Reduce penalty for high-frequency words (they're verified common phrases)
+            let isHighFrequency = (entry.frequencyRank ?? Int.max) <= 500
+            let shouldReducePenalty = hasCommonPattern || isHighFrequency
+            let penalty = shouldReducePenalty ? basePenalty * 0.5 : basePenalty
             score -= penalty
         }
 
@@ -408,13 +421,21 @@ public struct SearchService: SearchServiceProtocol {
 
                     // Rule 2: Heavy penalty if query is followed by kanji (compound noun)
                     // e.g., "嫌い箸" - the "箸" is a separate word
+                    // BUT: Skip penalty for entries with frequency data (they're verified real words)
                     if (0x4E00...0x9FFF).contains(firstScalar.value) {
                         // Kanji after query = compound noun, NOT a grammatical variant
-                        score -= 15  // Heavy penalty: -15
+                        let hasFrequency = entry.frequencyRank != nil
+                        if !hasFrequency {
+                            score -= 15  // Heavy penalty only for unverified compounds
+                        }
                     }
                     // Rule 3: Light penalty if followed by hiragana but NOT a valid suffix
+                    // BUT: Skip penalty for entries with frequency data (they're verified real words)
                     else if (0x3040...0x309F).contains(firstScalar.value) && !isValidSuffix {
-                        score -= 8  // Medium penalty: -8
+                        let hasFrequency = entry.frequencyRank != nil
+                        if !hasFrequency {
+                            score -= 8  // Medium penalty only for unverified compounds
+                        }
                     }
                     // Valid suffix: give grammar bonus (reduced to prioritize common compounds)
                     else if isValidSuffix {
@@ -455,6 +476,11 @@ public struct SearchService: SearchServiceProtocol {
         }
         if entry.headword.contains("嫌い") {
             print("📊 嫌い Scoring '\(entry.headword)': score=\(score), bucket=\(bucket), matchType=\(matchType)")
+        }
+
+        // DEBUG: Log scores for 今日 searches
+        if entry.headword.hasPrefix("今日") {
+            print("📊 今日 DEBUG '\(entry.headword)' (reading: \(entry.readingHiragana)): score=\(String(format: "%.1f", score)), bucket=\(bucket), freq=\(entry.frequencyRank?.description ?? "nil"), jlpt=\(entry.jlptLevel ?? "nil"), matchType=\(matchType)")
         }
 
         return (score, bucket)

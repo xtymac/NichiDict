@@ -140,12 +140,17 @@ public struct SearchService: SearchServiceProtocol {
                 matchType: matchType,
                 query: normalizedQuery
             )
+            let groupType = determineGroupType(
+                entry: entry,
+                matchType: matchType
+            )
             return SearchResult(
                 id: entry.id,
                 entry: entry,
                 matchType: matchType,
                 relevanceScore: relevance,
-                bucket: bucket
+                bucket: bucket,
+                groupType: groupType
             )
         }
         
@@ -585,6 +590,37 @@ public struct SearchService: SearchServiceProtocol {
 
         // C bucket: Everything else (general match + common patterns)
         return .generalMatch
+    }
+
+    /// Determine decorative group type for visual organization (does not affect sorting)
+    /// - 基本词: Exact match results
+    /// - 常用表达: Has JLPT level or frequency rank ≤ 200
+    /// - 衍生词: Has frequency but rank > 200
+    /// - 其他: No frequency data
+    private func determineGroupType(
+        entry: DictionaryEntry,
+        matchType: SearchResult.MatchType
+    ) -> SearchResult.GroupType {
+        // 基本词: Exact match
+        if matchType == .exact {
+            return .basicWord
+        }
+
+        // 常用表达: JLPT level or high frequency (≤200)
+        let hasJLPT = entry.jlptLevel != nil
+        let hasHighFrequency = (entry.frequencyRank ?? Int.max) <= 200
+
+        if hasJLPT || hasHighFrequency {
+            return .commonPhrase
+        }
+
+        // 衍生词: Has frequency but lower rank (>200)
+        if entry.frequencyRank != nil {
+            return .derivative
+        }
+
+        // 其他: No frequency data
+        return .other
     }
 
     /// Sanitize query to prevent SQL injection and FTS5 syntax errors

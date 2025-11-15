@@ -311,6 +311,13 @@ public final class LLMClient {
             return []
         }
 
+        // Extract existing offline examples to avoid duplication
+        let existingExamples = senses.flatMap { $0.examples.map { $0.japaneseText } }
+        print("📝 Found \(existingExamples.count) existing offline examples for \(entry.headword)")
+        if !existingExamples.isEmpty {
+            print("   Existing: \(existingExamples.prefix(3).joined(separator: " | "))")
+        }
+
         let key = cacheKeyForExamples(
             entryID: entry.id,
             provider: provider,
@@ -329,7 +336,8 @@ public final class LLMClient {
             entry: entry,
             senses: senses,
             locale: locale,
-            maxExamples: maxExamples
+            maxExamples: maxExamples,
+            existingExamples: existingExamples
         )
 
         let responseData: Data
@@ -650,7 +658,8 @@ public final class LLMClient {
     private func buildExamplePrompt(entry: DictionaryEntry,
                                     senses: [WordSense],
                                     locale: String,
-                                    maxExamples: Int) -> String {
+                                    maxExamples: Int,
+                                    existingExamples: [String] = []) -> String {
         let definitions = senses.prefix(5)
             .enumerated()
             .map { index, sense in
@@ -685,6 +694,27 @@ public final class LLMClient {
             """
         }
 
+        // Build existing examples warning if any
+        let existingExamplesWarning: String
+        if !existingExamples.isEmpty {
+            let examplesList = existingExamples.map { "  - \($0)" }.joined(separator: "\n")
+            existingExamplesWarning = """
+
+            ⚠️ CRITICAL: The following example sentences ALREADY EXIST for this word.
+            You MUST generate COMPLETELY DIFFERENT examples with DIFFERENT sentence patterns:
+            \(examplesList)
+
+            Requirements for NEW examples:
+            - Use DIFFERENT grammar structures (e.g., if existing uses 'は〜です', try 'を〜する', 'が〜ある', questions, negative forms, etc.)
+            - Use DIFFERENT verb forms and particles
+            - Use DIFFERENT contexts and scenarios
+            - Must be clearly distinguishable from existing examples
+            - Ensure variety in sentence endings (avoid repeating です/ます/だ if already used)
+            """
+        } else {
+            existingExamplesWarning = ""
+        }
+
         return """
         You are an expert Japanese language tutor. Generate natural example sentences for a dictionary entry.
 
@@ -693,15 +723,16 @@ public final class LLMClient {
         - Reading: \(entry.readingHiragana)
         - Romaji: \(entry.readingRomaji)
         - Core meanings:
-        \(definitions)
+        \(definitions)\(existingExamplesWarning)
 
         Requirements:
-        1. Produce up to \(maxExamples) natural Japanese sentences (20-30 characters) that demonstrate typical usage in daily life. Each sentence MUST include the headword or its conjugated/inflected form once.
+        1. Produce up to \(maxExamples) natural Japanese sentences (15-35 characters) that demonstrate typical usage in daily life. Each sentence MUST include the headword or its conjugated/inflected form once.
         2. Keep sentences simple and practical. Avoid uncommon idioms or archaic grammar.
-        3. Return JSON ONLY with schema:
+        3. Ensure variety in grammar patterns: use different sentence types (declarative, question, negative, past tense, polite/casual forms, etc.)
+        4. Return JSON ONLY with schema:
            \(jsonSchema)
         \(translationInstruction)
-        5. Avoid romaji, avoid placeholders, avoid line breaks inside fields.
+        6. Avoid romaji, avoid placeholders, avoid line breaks inside fields.
 
         Respond with JSON only.
         """

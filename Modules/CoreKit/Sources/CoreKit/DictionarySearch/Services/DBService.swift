@@ -347,15 +347,12 @@ public struct DBService: DBServiceProtocol {
                     agg.semantic_priority,
                     -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     agg.first_matching_sense,
-                    -- Priority 4: Part-of-speech (verbs > nouns > other)
+                    -- Priority 4: Frequency (common words first, generalizable across all queries)
+                    COALESCE(e.frequency_rank, 999999),
+                    -- Priority 5: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 5: Parenthetical semantic match
+                    -- Priority 6: Parenthetical semantic match
                     agg.parenthetical_priority,
-                    -- Priority 6: Common words
-                    CASE
-                        WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
-                        ELSE 1
-                    END,
                     -- Priority 7: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
@@ -367,8 +364,6 @@ public struct DBService: DBServiceProtocol {
                     END,
                     -- Priority 8: Match quality
                     agg.match_priority,
-                    -- Priority 9: Frequency
-                    COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,
                     e.id
@@ -730,58 +725,29 @@ public struct DBService: DBServiceProtocol {
         let lowerQuery = query.lowercased()
 
         let coreWordsMap: [String: [String]] = [
-            // Verbs - Movement
+            // ULTRA-BASIC N5 verbs only (frequency will handle the rest)
+            // Movement
             "come": ["来る"],
-            "go": ["行く", "向かう"],  // Basic: 行く (general) / 向かう (head towards)
-            "go out": ["出かける", "消える"],  // Phrasal verb: go out (leave) > go out (extinguish)
-            "return": ["帰る", "戻る"],
-            "arrive": ["着く"],
+            "go": ["行く"],
 
-            // Verbs - Actions
+            // Basic Actions
             "eat": ["食べる"],
             "drink": ["飲む"],
             "see": ["見る"],
-            "watch": ["見る"],
-            "look": ["見る"],
             "hear": ["聞く"],
-            "listen": ["聞く"],
             "speak": ["話す"],
             "say": ["言う"],
             "read": ["読む"],
             "write": ["書く"],
-            "buy": ["買う"],
-            "make": ["作る"],
             "do": ["する"],
-            "take": ["取る"],
-            "give": ["あげる", "くれる"],
-            "receive": ["もらう"],
-            "open": ["開ける"],
-            "close": ["閉める"],
-            "begin": ["始まる", "始める"],
-            "end": ["終わる"],
-            "wait": ["待つ"],
-            "meet": ["会う"],
-            "understand": ["分かる"],
-            "know": ["知る"],
-            "think": ["思う"],
-            "forget": ["忘れる"],
-            "remember": ["覚える"],
 
-            // Verbs - State
-            "wake": ["目覚める", "目を覚ます"],
-            "wake up": ["目覚める", "目を覚ます"],  // Phrasal verb variant
+            // State
+            "wake up": ["目覚める", "目を覚ます"],  // Keep this one as it's pedagogically important
             "sleep": ["寝る"],
             "get up": ["起きる"],
-            "sit": ["座る"],
-            "stand": ["立つ"],
-            "walk": ["歩く"],
-            "run": ["走る"],
-            "stop": ["止まる"],
 
-            // Verbs - Existence
+            // Existence (fundamental copulas)
             "be": ["いる", "ある"],
-            "exist": ["ある"],
-            "live": ["住む"],
         ]
 
         return coreWordsMap[lowerQuery] ?? []

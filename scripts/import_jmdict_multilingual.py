@@ -259,13 +259,32 @@ def parse_jmdict_entry(entry_elem) -> Optional[Dict]:
             return None
         jmdict_id = int(ent_seq_elem.text)
 
-        # Get kanji elements (headwords)
+        # Get kanji elements (headwords) - filter out variant-only forms
         k_eles = entry_elem.findall('k_ele')
         headwords = []
         for k_ele in k_eles:
             keb = k_ele.find('keb')
             if keb is not None and keb.text:
-                headwords.append(keb.text)
+                # Check for variant kanji markers that should be filtered out
+                # XML parser expands entities to their full text
+                ke_inf_elems = k_ele.findall('ke_inf')
+                ke_inf_texts = [elem.text for elem in ke_inf_elems if elem.text]
+
+                # Filter out search-only, rare, and old kanji variants
+                is_variant_only = any(
+                    'search-only kanji form' in text or
+                    'rarely-used kanji form' in text or
+                    'old or irregular kanji form' in text
+                    for text in ke_inf_texts
+                )
+
+                # Check if this kanji has priority markers (common words)
+                priorities = [ke_pri.text for ke_pri in k_ele.findall('ke_pri')]
+
+                # Include if: has priority markers OR is not a variant-only form
+                # This ensures common words are always included, and rare variants are excluded
+                if priorities or not is_variant_only:
+                    headwords.append(keb.text)
 
         # Get reading elements
         r_eles = entry_elem.findall('r_ele')
@@ -285,6 +304,28 @@ def parse_jmdict_entry(entry_elem) -> Optional[Dict]:
         # Get sense elements (definitions)
         senses = []
         for sense_elem in entry_elem.findall('sense'):
+            # Check for misc tags that indicate non-modern/specialized terms
+            # Filter out: archaic, obsolete, rare, obscure terms
+            misc_elems = sense_elem.findall('misc')
+            misc_tags = [elem.text for elem in misc_elems if elem.text]
+
+            # Skip senses with these markers (XML parser expands entities)
+            skip_markers = [
+                'archaic',           # &arch; - 古語、廃語
+                'obsolete term',     # &obs; - 廃語
+                'obscure term',      # &obsc; - 罕用語
+                'rare',              # &rare; - 稀用語
+                'dated term',        # &dated; - 時代遅れ
+            ]
+
+            should_skip = any(
+                any(marker in tag for marker in skip_markers)
+                for tag in misc_tags
+            )
+
+            if should_skip:
+                continue  # Skip this sense
+
             # Part of speech
             pos_list = [pos.text for pos in sense_elem.findall('pos')]
             # Simplify POS tags

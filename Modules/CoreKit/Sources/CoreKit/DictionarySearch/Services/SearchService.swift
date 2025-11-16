@@ -128,6 +128,11 @@ public struct SearchService: SearchServiceProtocol {
         }
         
         // Step 5: Classify match types and create SearchResults
+        print("🔍 DEBUG SearchService: dbResults order before map:")
+        for (index, entry) in dbResults.enumerated() {
+            print("  \(index + 1). \(entry.headword)")
+        }
+
         let searchResults = dbResults.map { entry in
             let matchType = classifyMatchType(
                 entry: entry,
@@ -138,7 +143,8 @@ public struct SearchService: SearchServiceProtocol {
             let (relevance, bucket) = calculateRelevanceAndBucket(
                 entry: entry,
                 matchType: matchType,
-                query: normalizedQuery
+                query: normalizedQuery,
+                useReverseSearch: useReverseSearch
             )
             let groupType = determineGroupType(
                 entry: entry,
@@ -153,11 +159,17 @@ public struct SearchService: SearchServiceProtocol {
                 groupType: groupType
             )
         }
-        
+
+        print("🔍 DEBUG SearchService: searchResults order after map:")
+        for (index, result) in searchResults.enumerated() {
+            print("  \(index + 1). \(result.entry.headword) (bucket: \(result.bucket), score: \(result.relevanceScore))")
+        }
+
         // Step 6: Rank results (bucketed sorting: bucket first, then score)
         let ranked: [SearchResult]
         if useReverseSearch {
             ranked = searchResults
+            print("🔍 DEBUG SearchService: Reverse search - NO sorting applied, using searchResults as-is")
         } else {
             ranked = searchResults.sorted { lhs, rhs in
                 // Primary: Bucket (A → B → C → D)
@@ -188,7 +200,12 @@ public struct SearchService: SearchServiceProtocol {
         }
 
         // Step 7: Limit to maxResults
-        return Array(ranked.prefix(maxResults))
+        let finalResults = Array(ranked.prefix(maxResults))
+        print("🔍 DEBUG SearchService: Final results order being returned:")
+        for (index, result) in finalResults.enumerated() {
+            print("  \(index + 1). \(result.entry.headword)")
+        }
+        return finalResults
     }
     
     private func classifyMatchType(
@@ -262,7 +279,8 @@ public struct SearchService: SearchServiceProtocol {
     private func calculateRelevanceAndBucket(
         entry: DictionaryEntry,
         matchType: SearchResult.MatchType,
-        query: String
+        query: String,
+        useReverseSearch: Bool
     ) -> (Double, SearchResult.ResultBucket) {
         var score: Double = 0
         let lowercaseQuery = query.lowercased()
@@ -397,7 +415,12 @@ public struct SearchService: SearchServiceProtocol {
 
         // 6. Phrase penalty: Only for [noun]+[particle]+[verb] patterns (-10)
         // Note: 名詞+の+名詞 (noun+no+noun) is NOT penalized
-        let phrasePenalty = detectPhrasePenalty(headword: entry.headword, partOfSpeech: entry.senses.first?.partOfSpeech)
+        // IMPORTANT: Skip phrase penalty for reverse search - phrases like "目を覚ます" are exactly what we want!
+        let phrasePenalty = detectPhrasePenalty(
+            headword: entry.headword,
+            partOfSpeech: entry.senses.first?.partOfSpeech,
+            useReverseSearch: useReverseSearch
+        )
         score += phrasePenalty
 
         // 7. Proper noun penalty: -12 if proper noun and not exact/lemma
@@ -493,7 +516,13 @@ public struct SearchService: SearchServiceProtocol {
 
     /// Detect phrase patterns and return penalty
     /// Only penalize [noun]+[particle]+[verb/suru-verb] patterns
-    private func detectPhrasePenalty(headword: String, partOfSpeech: String?) -> Double {
+    /// For reverse search (English→Japanese), we WANT phrases, so skip penalty
+    private func detectPhrasePenalty(headword: String, partOfSpeech: String?, useReverseSearch: Bool) -> Double {
+        // Skip phrase penalty for reverse search - expressions like "目を覚ます" are core translations!
+        if useReverseSearch {
+            return 0
+        }
+
         // Check for particles: を、に、で、が、と、へ、から、まで
         let particles = ["を", "に", "で", "が", "へ", "から", "まで"]
 

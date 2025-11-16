@@ -220,8 +220,31 @@ public struct DBService: DBServiceProtocol {
                 WHERE name IN ('definition_chinese_simplified', 'definition_chinese_traditional')
                 """) ?? false
 
-            // Build core headwords filter if provided
-            let coreHeadwordsArray = coreHeadwords.map { Array($0) } ?? []
+            // Build core headwords filter - automatically detect from query
+            var coreHeadwordsArray: [String] = []
+
+            // Extract base verb from query (e.g., "to wake up" → "wake up", "to go out" → "go out")
+            if lowerQuery.hasPrefix("to ") {
+                let afterTo = String(lowerQuery.dropFirst(3)) // Remove "to "
+
+                // Try full phrase first (e.g., "go out", "wake up")
+                coreHeadwordsArray = self.getCoreHeadwordsForQuery(afterTo)
+
+                // If no mapping found for full phrase, try first word only
+                if coreHeadwordsArray.isEmpty, let spaceIndex = afterTo.firstIndex(of: " ") {
+                    let firstWord = String(afterTo[..<spaceIndex])
+                    coreHeadwordsArray = self.getCoreHeadwordsForQuery(firstWord)
+                    print("🗄️ DBService.searchReverse: No mapping for '\(afterTo)', trying first word '\(firstWord)', core headwords: \(coreHeadwordsArray)")
+                } else {
+                    print("🗄️ DBService.searchReverse: Detected base verb '\(afterTo)', core headwords: \(coreHeadwordsArray)")
+                }
+            }
+
+            // Merge with any explicitly provided core headwords
+            if let providedCoreHeadwords = coreHeadwords {
+                coreHeadwordsArray.append(contentsOf: providedCoreHeadwords)
+                coreHeadwordsArray = Array(Set(coreHeadwordsArray)) // Remove duplicates
+            }
 
             let sql: String
             var arguments: [DatabaseValueConvertible]
@@ -242,6 +265,7 @@ public struct DBService: DBServiceProtocol {
                         ws.definition_chinese_simplified,
                         ws.definition_chinese_traditional,
                         ws.part_of_speech,
+                        ws.sense_order,
                         -- Match priority: exact > prefix > word boundary > contains
                         CASE
                             WHEN LOWER(ws.definition_english) = ? THEN 0
@@ -266,7 +290,31 @@ public struct DBService: DBServiceProtocol {
                             WHEN ws.part_of_speech LIKE '%verb%' THEN 0
                             WHEN ws.part_of_speech LIKE '%noun%' THEN 1
                             ELSE 2
-                        END AS pos_weight
+                        END AS pos_weight,
+                        -- Semantic category priority: prioritize by real-world usage frequency
+                        -- Order: 着る > 履く > 掛ける > 締める > 下げる > 為る > 差す
+                        CASE
+                            -- Tier 0: 着る - most specific clothing verb (from shoulders down)
+                            WHEN ws.definition_english LIKE '%(from the shoulders down)%' THEN 0
+                            -- Tier 1: 履く - pants/shoes/footwear (high frequency)
+                            WHEN ws.definition_english LIKE '%(lower-body%' OR ws.definition_english LIKE '%(footwear%'
+                                 OR ws.definition_english LIKE '%(pants%' OR ws.definition_english LIKE '%(shoes%' THEN 1
+                            -- Tier 2: 掛ける - glasses/necklace/accessories
+                            WHEN ws.definition_english LIKE '%(glasses%' OR ws.definition_english LIKE '%(necklace%'
+                                 OR ws.definition_english LIKE '%(accessor%' THEN 2
+                            -- Tier 3: 締める, 被る - belt/necktie/hat
+                            WHEN ws.definition_english LIKE '%(belt%' OR ws.definition_english LIKE '%(necktie%'
+                                 OR ws.definition_english LIKE '%(tie%' OR ws.definition_english LIKE '%(one''s head)%'
+                                 OR ws.definition_english LIKE '%(hat%' THEN 3
+                            -- Tier 4: 下げる - hanging decoration
+                            WHEN ws.definition_english LIKE '%e.g. decoration%' THEN 4
+                            -- Tier 5: 為る - abstract/general wear (clothes without specific part)
+                            WHEN ws.definition_english LIKE '%(cloth%' OR ws.definition_english LIKE '%(garment%' THEN 5
+                            -- Tier 6: 差す - sword/samurai terminology (least common)
+                            WHEN ws.definition_english LIKE '%(a sword%' OR ws.definition_english LIKE '%(sword%'
+                                 OR ws.definition_english LIKE '%at one''s side%' THEN 6
+                            ELSE 7
+                        END AS semantic_priority
                     FROM dictionary_entries e
                     JOIN word_senses ws ON e.id = ws.entry_id
                     WHERE (
@@ -280,7 +328,9 @@ public struct DBService: DBServiceProtocol {
                         c.id,
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
-                        MIN(c.pos_weight) AS pos_weight
+                        MIN(c.pos_weight) AS pos_weight,
+                        MIN(c.semantic_priority) AS semantic_priority,
+                        MIN(c.sense_order) AS first_matching_sense
                     FROM candidate c
                     GROUP BY c.id
                 )
@@ -293,16 +343,20 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: Parenthetical semantic match
-                    agg.parenthetical_priority,
-                    -- Priority 3: Part-of-speech (verbs > nouns > other)
+                    -- Priority 2: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    agg.semantic_priority,
+                    -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    agg.first_matching_sense,
+                    -- Priority 4: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 4: Common words
+                    -- Priority 5: Parenthetical semantic match
+                    agg.parenthetical_priority,
+                    -- Priority 6: Common words
                     CASE
                         WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
                         ELSE 1
                     END,
-                    -- Priority 5: DEMOTE pure katakana (reverse of old logic)
+                    -- Priority 7: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -311,9 +365,9 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 6: Match quality
+                    -- Priority 8: Match quality
                     agg.match_priority,
-                    -- Priority 7: Frequency
+                    -- Priority 9: Frequency
                     COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,
@@ -347,6 +401,7 @@ public struct DBService: DBServiceProtocol {
                         e.created_at,
                         ws.definition_english,
                         ws.part_of_speech,
+                        ws.sense_order,
                         -- Match priority
                         CASE
                             WHEN LOWER(ws.definition_english) = ? THEN 0
@@ -371,7 +426,31 @@ public struct DBService: DBServiceProtocol {
                             WHEN ws.part_of_speech LIKE '%verb%' THEN 0
                             WHEN ws.part_of_speech LIKE '%noun%' THEN 1
                             ELSE 2
-                        END AS pos_weight
+                        END AS pos_weight,
+                        -- Semantic category priority: prioritize by real-world usage frequency
+                        -- Order: 着る > 履く > 掛ける > 締める > 下げる > 為る > 差す
+                        CASE
+                            -- Tier 0: 着る - most specific clothing verb (from shoulders down)
+                            WHEN ws.definition_english LIKE '%(from the shoulders down)%' THEN 0
+                            -- Tier 1: 履く - pants/shoes/footwear (high frequency)
+                            WHEN ws.definition_english LIKE '%(lower-body%' OR ws.definition_english LIKE '%(footwear%'
+                                 OR ws.definition_english LIKE '%(pants%' OR ws.definition_english LIKE '%(shoes%' THEN 1
+                            -- Tier 2: 掛ける - glasses/necklace/accessories
+                            WHEN ws.definition_english LIKE '%(glasses%' OR ws.definition_english LIKE '%(necklace%'
+                                 OR ws.definition_english LIKE '%(accessor%' THEN 2
+                            -- Tier 3: 締める, 被る - belt/necktie/hat
+                            WHEN ws.definition_english LIKE '%(belt%' OR ws.definition_english LIKE '%(necktie%'
+                                 OR ws.definition_english LIKE '%(tie%' OR ws.definition_english LIKE '%(one''s head)%'
+                                 OR ws.definition_english LIKE '%(hat%' THEN 3
+                            -- Tier 4: 下げる - hanging decoration
+                            WHEN ws.definition_english LIKE '%e.g. decoration%' THEN 4
+                            -- Tier 5: 為る - abstract/general wear (clothes without specific part)
+                            WHEN ws.definition_english LIKE '%(cloth%' OR ws.definition_english LIKE '%(garment%' THEN 5
+                            -- Tier 6: 差す - sword/samurai terminology (least common)
+                            WHEN ws.definition_english LIKE '%(a sword%' OR ws.definition_english LIKE '%(sword%'
+                                 OR ws.definition_english LIKE '%at one''s side%' THEN 6
+                            ELSE 7
+                        END AS semantic_priority
                     FROM dictionary_entries e
                     JOIN word_senses ws ON e.id = ws.entry_id
                     WHERE LOWER(ws.definition_english) LIKE '%' || ? || '%'
@@ -381,7 +460,9 @@ public struct DBService: DBServiceProtocol {
                         c.id,
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
-                        MIN(c.pos_weight) AS pos_weight
+                        MIN(c.pos_weight) AS pos_weight,
+                        MIN(c.semantic_priority) AS semantic_priority,
+                        MIN(c.sense_order) AS first_matching_sense
                     FROM candidate c
                     GROUP BY c.id
                 )
@@ -394,16 +475,20 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: Parenthetical semantic match
-                    agg.parenthetical_priority,
-                    -- Priority 3: Part-of-speech
+                    -- Priority 2: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    agg.semantic_priority,
+                    -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    agg.first_matching_sense,
+                    -- Priority 4: Part-of-speech
                     agg.pos_weight,
-                    -- Priority 4: Common words
+                    -- Priority 5: Parenthetical semantic match
+                    agg.parenthetical_priority,
+                    -- Priority 6: Common words
                     CASE
                         WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
                         ELSE 1
                     END,
-                    -- Priority 5: DEMOTE pure katakana
+                    -- Priority 7: DEMOTE pure katakana
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -412,9 +497,9 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 6: Match quality
+                    -- Priority 8: Match quality
                     agg.match_priority,
-                    -- Priority 7: Frequency
+                    -- Priority 9: Frequency
                     COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,
@@ -438,6 +523,14 @@ public struct DBService: DBServiceProtocol {
 
             let entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
             print("🗄️ DBService.searchReverse: SQL returned \(entries.count) entries before filtering")
+            print("🗄️ DBService.searchReverse: Core headwords array: \(coreHeadwordsArray)")
+            if !entries.isEmpty {
+                print("🗄️ DBService.searchReverse: First 10 entries from SQL:")
+                for (index, entry) in entries.prefix(10).enumerated() {
+                    let isCoreWord = coreHeadwordsArray.contains(entry.headword)
+                    print("  \(index + 1). \(entry.headword) \(isCoreWord ? "✓ CORE" : "")")
+                }
+            }
 
             // If no results, return empty
             guard !entries.isEmpty else {
@@ -445,25 +538,161 @@ public struct DBService: DBServiceProtocol {
                 return []
             }
 
+            // Apply core word priority boost in Swift (more reliable than SQL dynamic params)
+            var sortedEntries = entries
+            if !coreHeadwordsArray.isEmpty {
+                // Debug: check exact matching
+                print("🔍 DEBUG: Checking core word matching...")
+                for (index, entry) in entries.prefix(10).enumerated() {
+                    let headword = entry.headword
+                    let isCore = coreHeadwordsArray.contains(headword)
+                    print("  Entry \(index + 1): '\(headword)' (length: \(headword.count)) - Core: \(isCore)")
+                    if !isCore {
+                        // Check for close matches
+                        for coreWord in coreHeadwordsArray {
+                            if headword.contains(coreWord) || coreWord.contains(headword) {
+                                print("    ⚠️  Close match with core word: '\(coreWord)' (length: \(coreWord.count))")
+                            }
+                        }
+                    }
+                }
+
+                sortedEntries = entries.sorted { entry1, entry2 in
+                    let index1 = coreHeadwordsArray.firstIndex(of: entry1.headword)
+                    let index2 = coreHeadwordsArray.firstIndex(of: entry2.headword)
+
+                    // Both are core words - sort by array position (earlier in array = higher priority)
+                    if let idx1 = index1, let idx2 = index2 {
+                        return idx1 < idx2
+                    }
+
+                    // Only entry1 is core - it comes first
+                    if index1 != nil && index2 == nil {
+                        return true
+                    }
+
+                    // Only entry2 is core - it comes first
+                    if index1 == nil && index2 != nil {
+                        return false
+                    }
+
+                    // Neither is core - maintain SQL order
+                    return false  // Stable sort
+                }
+
+                print("🗄️ DBService.searchReverse: After core word reordering:")
+                for (index, entry) in sortedEntries.prefix(10).enumerated() {
+                    let isCoreWord = coreHeadwordsArray.contains(entry.headword)
+                    print("  \(index + 1). \(entry.headword) \(isCoreWord ? "✓ CORE" : "")")
+                }
+            }
+
             // Load senses and filter STRICTLY to only relevant ones
             var filteredEntries: [DictionaryEntry] = []
 
-            for var entry in entries {
+            print("🔍 DEBUG: Starting filtering process...")
+            for (index, var entry) in sortedEntries.enumerated() {
+                print("  Processing entry \(index + 1): \(entry.headword)")
                 let allSenses = try WordSense
                     .filter(Column("entry_id") == entry.id)
                     .order(Column("sense_order"))
                     .fetchAll(db)
 
-                // STRICT filtering: only exact word matches
+                // IMPORTANT: Core words bypass definition filtering
+                // They are included regardless of whether their definition matches the query
+                let isCoreWord = coreHeadwordsArray.contains(entry.headword)
+                if isCoreWord {
+                    entry.senses = allSenses
+                    filteredEntries.append(entry)
+                    print("    ✓ Added to filteredEntries (CORE WORD - bypassed filtering, now has \(filteredEntries.count) entries)")
+                    continue
+                }
+
+                // STRICT filtering: support both exact word matches and multi-word phrases
                 let lowerQuery = query.lowercased()
                 let relevantSenses = allSenses.filter { sense in
                     let englishDef = sense.definitionEnglish.lowercased()
                     let chineseSimp = sense.definitionChineseSimplified ?? ""
 
-                    // English: must be exact word match (with word boundaries)
-                    let englishWords = englishDef.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                        .filter { !$0.isEmpty }
-                    let exactEnglishMatch = englishWords.contains { $0 == lowerQuery }
+                    // English: support multi-word phrases or exact word matches
+                    var exactEnglishMatch: Bool
+                    if lowerQuery.contains(" ") {
+                        // Multi-word phrase: check if the phrase appears in the definition with word boundaries
+                        // Use regex to ensure we match whole phrases only
+                        let pattern = "\\b\(NSRegularExpression.escapedPattern(for: lowerQuery))\\b"
+                        exactEnglishMatch = englishDef.range(of: pattern, options: .regularExpression) != nil
+                    } else {
+                        // Single word: exact word match (with word boundaries)
+                        let englishWords = englishDef.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                            .filter { !$0.isEmpty }
+                        exactEnglishMatch = englishWords.contains { $0 == lowerQuery }
+                    }
+
+                    // Strict filtering for verb queries: only keep core meanings
+                    if exactEnglishMatch && lowerQuery.hasPrefix("to ") {
+                        // Extract the base verb from the query (e.g., "to come" -> "come")
+                        let baseVerb = String(lowerQuery.dropFirst(3))
+                        let expectedPattern = "to \(baseVerb)"
+
+                        // For verb queries, we want strict matching:
+                        // 1. Definition must start with "to [verb]"
+                        // 2. After "to [verb]", only allow: semicolon, space+parenthesis, or end of string
+                        // 3. Exclude compound phrases like "to come out", "to come to", "to come true", etc.
+                        // 4. For multi-meaning verbs (e.g., "to come; to go"), check if headword contains the related kanji
+
+                        var isStrictMatch = false
+                        var needsKanjiCheck = false
+
+                        // Check if definition starts with our verb pattern
+                        if englishDef.hasPrefix(expectedPattern) {
+                            let remainingDef = String(englishDef.dropFirst(expectedPattern.count))
+
+                            // Define basic verbs that represent fundamentally different actions
+                            let basicVerbs = [
+                                "to go", "to be", "to have", "to do",
+                                "to eat", "to drink", "to see", "to hear",
+                                "to make", "to take", "to give", "to get",
+                                "to know", "to think", "to feel", "to want",
+                                "to use", "to find", "to work", "to live"
+                            ]
+
+                            // Check if the ENTIRE definition contains other basic verbs
+                            // (not just the current query verb)
+                            let otherBasicVerbs = basicVerbs.filter { $0 != lowerQuery }
+                            let hasOtherBasicVerb = otherBasicVerbs.contains { englishDef.contains("; \($0)") }
+
+                            if hasOtherBasicVerb {
+                                // Multi-meaning verb - need kanji check
+                                needsKanjiCheck = true
+                            } else {
+                                // Check what comes after "to [verb]"
+                                if remainingDef.isEmpty {
+                                    // "to come" - exact match
+                                    isStrictMatch = true
+                                } else if remainingDef.hasPrefix(";") || remainingDef.hasPrefix(" (") {
+                                    // "to come; ..." or "to come (...)" - acceptable
+                                    isStrictMatch = true
+                                }
+                                // Otherwise: "to come out", "to come to", etc. - reject
+                            }
+                        }
+
+                        if !isStrictMatch || needsKanjiCheck {
+                            // Not a strict match OR needs kanji check - verify headword contains related Japanese char
+                            // OR is a common honorific/humble form
+                            let relatedChars = self.getJapaneseCharsForQuery(baseVerb)
+                            let containsRelatedChar = relatedChars.contains { entry.headword.contains($0) }
+
+                            // Check if this is a common honorific/humble form (whitelist)
+                            let honorificWhitelist = self.getHonorificWhitelistForQuery(baseVerb)
+                            let isHonorific = honorificWhitelist.contains(entry.headword)
+
+                            if !containsRelatedChar && !isHonorific {
+                                // Not strict match, no related Japanese char, and not honorific - exclude it
+                                exactEnglishMatch = false
+                            }
+                        }
+                    }
 
                     // Chinese: must be exact word in semicolon-separated list
                     let chineseWords = chineseSimp.components(separatedBy: "; ")
@@ -478,12 +707,196 @@ public struct DBService: DBServiceProtocol {
                 if !relevantSenses.isEmpty {
                     entry.senses = relevantSenses
                     filteredEntries.append(entry)
+                    print("    ✓ Added to filteredEntries (now has \(filteredEntries.count) entries)")
+                } else {
+                    print("    ✗ Excluded (no relevant senses)")
                 }
+            }
+
+            print("🔍 DEBUG: Final filteredEntries order:")
+            for (index, entry) in filteredEntries.enumerated() {
+                let isCore = coreHeadwordsArray.contains(entry.headword)
+                print("  \(index + 1). \(entry.headword) \(isCore ? "✓ CORE" : "")")
             }
 
             print("🗄️ DBService.searchReverse: Returning \(filteredEntries.count) filtered entries")
             return filteredEntries
         }
+    }
+
+    /// Returns core/basic words for a given query that should be prioritized
+    /// These are the most fundamental, commonly taught words for each concept
+    private func getCoreHeadwordsForQuery(_ query: String) -> [String] {
+        let lowerQuery = query.lowercased()
+
+        let coreWordsMap: [String: [String]] = [
+            // Verbs - Movement
+            "come": ["来る"],
+            "go": ["行く", "向かう"],  // Basic: 行く (general) / 向かう (head towards)
+            "go out": ["出かける", "消える"],  // Phrasal verb: go out (leave) > go out (extinguish)
+            "return": ["帰る", "戻る"],
+            "arrive": ["着く"],
+
+            // Verbs - Actions
+            "eat": ["食べる"],
+            "drink": ["飲む"],
+            "see": ["見る"],
+            "watch": ["見る"],
+            "look": ["見る"],
+            "hear": ["聞く"],
+            "listen": ["聞く"],
+            "speak": ["話す"],
+            "say": ["言う"],
+            "read": ["読む"],
+            "write": ["書く"],
+            "buy": ["買う"],
+            "make": ["作る"],
+            "do": ["する"],
+            "take": ["取る"],
+            "give": ["あげる", "くれる"],
+            "receive": ["もらう"],
+            "open": ["開ける"],
+            "close": ["閉める"],
+            "begin": ["始まる", "始める"],
+            "end": ["終わる"],
+            "wait": ["待つ"],
+            "meet": ["会う"],
+            "understand": ["分かる"],
+            "know": ["知る"],
+            "think": ["思う"],
+            "forget": ["忘れる"],
+            "remember": ["覚える"],
+
+            // Verbs - State
+            "wake": ["目覚める", "目を覚ます"],
+            "wake up": ["目覚める", "目を覚ます"],  // Phrasal verb variant
+            "sleep": ["寝る"],
+            "get up": ["起きる"],
+            "sit": ["座る"],
+            "stand": ["立つ"],
+            "walk": ["歩く"],
+            "run": ["走る"],
+            "stop": ["止まる"],
+
+            // Verbs - Existence
+            "be": ["いる", "ある"],
+            "exist": ["ある"],
+            "live": ["住む"],
+        ]
+
+        return coreWordsMap[lowerQuery] ?? []
+    }
+
+    /// Returns common honorific/humble forms for a given verb query
+    /// These words should be included even if they don't contain the core kanji
+    private func getHonorificWhitelistForQuery(_ query: String) -> [String] {
+        let lowerQuery = query.lowercased()
+
+        let honorificMap: [String: [String]] = [
+            // Verbs - Actions
+            "eat": ["頂く", "召し上がる", "召す"],
+            "drink": ["頂く", "召し上がる"],
+            "come": ["いらっしゃる", "お出でになる", "おいでになる", "お見えになる"],
+            "go": ["いらっしゃる", "お出でになる", "おいでになる"],
+            "be": ["いらっしゃる", "おられる"],
+            "say": ["仰る", "おっしゃる"],
+            "do": ["なさる"],
+            "see": ["ご覧になる"],
+            "know": ["ご存じ"],
+            "give": ["下さる", "くださる"],
+            "sleep": ["お休みになる"],
+        ]
+
+        return honorificMap[lowerQuery] ?? []
+    }
+
+    /// Maps English query words to their common Japanese characters
+    /// Used for whitelisting compound expressions that contain the core Japanese character
+    private func getJapaneseCharsForQuery(_ query: String) -> [String] {
+        let lowerQuery = query.lowercased()
+
+        // Map common N5 verbs and nouns to their Japanese characters
+        let queryToJapaneseMap: [String: [String]] = [
+            // Verbs - Movement
+            "come": ["来"],
+            "go": ["行", "往"],
+            "go out": ["出", "消"],  // Phrasal verb: go out (depart 出かける / extinguish 消える)
+            "return": ["戻", "帰", "返"],
+            "enter": ["入"],
+            "exit": ["出"],
+            "leave": ["出", "去"],
+            "arrive": ["着", "到"],
+
+            // Verbs - Actions
+            "eat": ["食"],
+            "drink": ["飲"],
+            "see": ["見"],
+            "watch": ["見"],
+            "look": ["見"],
+            "hear": ["聞"],
+            "listen": ["聞"],
+            "speak": ["話", "言"],
+            "say": ["言"],
+            "talk": ["話"],
+            "read": ["読"],
+            "write": ["書"],
+            "buy": ["買"],
+            "sell": ["売"],
+            "make": ["作", "造"],
+            "do": ["為", "行"],
+            "give": ["与", "呉"],
+            "receive": ["受", "貰"],
+            "take": ["取"],
+            "put": ["置"],
+            "wear": ["着", "履", "被", "掛", "締"],
+            "open": ["開"],
+            "close": ["閉"],
+            "begin": ["始"],
+            "end": ["終"],
+            "stop": ["止"],
+            "wait": ["待"],
+            "meet": ["会", "遭"],
+            "understand": ["解", "分"],
+            "know": ["知"],
+            "think": ["思", "考"],
+            "forget": ["忘"],
+            "remember": ["覚"],
+
+            // Verbs - State
+            "be": ["在", "居", "有"],
+            "exist": ["在", "有"],
+            "live": ["住", "生", "活"],
+            "die": ["死"],
+            "sleep": ["寝", "眠"],
+            "wake": ["起", "覚"],
+
+            // Nouns - Time
+            "day": ["日"],
+            "time": ["時"],
+            "year": ["年"],
+            "month": ["月"],
+            "week": ["週"],
+
+            // Nouns - People
+            "person": ["人"],
+            "student": ["生"],
+            "teacher": ["師"],
+
+            // Nouns - Places
+            "house": ["家"],
+            "school": ["校"],
+            "station": ["駅"],
+
+            // Adjectives
+            "big": ["大"],
+            "small": ["小"],
+            "new": ["新"],
+            "old": ["古"],
+            "good": ["良"],
+            "bad": ["悪"],
+        ]
+
+        return queryToJapaneseMap[lowerQuery] ?? []
     }
 
     public func fetchEntry(id: Int) async throws -> DictionaryEntry? {

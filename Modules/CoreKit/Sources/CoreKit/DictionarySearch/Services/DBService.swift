@@ -28,8 +28,24 @@ public struct DBService: DBServiceProtocol {
         }
 
         return try await dbQueue.read { db in
-            // Add wildcard for prefix matching in FTS5
-            let ftsQuery = query + "*"
+            // Verb stem extraction for better matching
+            // If query ends with verb suffix (る、く、ぐ、す、つ、ぬ、ぶ、む、う), also search stem
+            var ftsQuery = query + "*"
+            var stemQuery: String? = nil
+
+            if query.count >= 2 {
+                let verbSuffixes = ["る", "く", "ぐ", "す", "つ", "ぬ", "ぶ", "む", "う"]
+                if verbSuffixes.contains(where: { query.hasSuffix($0) }) {
+                    // Extract stem by removing last character
+                    let stem = String(query.dropLast())
+                    if !stem.isEmpty {
+                        stemQuery = stem
+                        // Combine queries: search for both "食べる*" OR "食べ*"
+                        ftsQuery = query + "* OR " + stem + "*"
+                        print("🔍 DBService: Verb detected. Stem: '\(stem)', FTS query: '\(ftsQuery)'")
+                    }
+                }
+            }
 
             // Simple FTS5 search query with precise ranking
             let sql = """
@@ -267,15 +283,19 @@ public struct DBService: DBServiceProtocol {
                         ws.part_of_speech,
                         ws.sense_order,
                         -- Match priority: exact > prefix > word boundary > contains
+                        -- Note: Exclude possessive forms (e.g., "one's" when searching "one")
                         CASE
                             WHEN LOWER(ws.definition_english) = ? THEN 0
                             WHEN LOWER(ws.definition_english) = 'to ' || ? THEN 1
                             WHEN LOWER(ws.definition_english) LIKE 'to ' || ? || ';%' THEN 1
-                            WHEN LOWER(ws.definition_english) LIKE ? || ' %' THEN 2
+                            WHEN LOWER(ws.definition_english) LIKE ? || ' %'
+                                 AND LOWER(ws.definition_english) NOT LIKE ? || '''s%' THEN 2
                             WHEN LOWER(ws.definition_english) LIKE ? || ';%' THEN 2
-                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ' %' THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ' %'
+                                 AND LOWER(ws.definition_english) NOT LIKE '%' || ? || '''s%' THEN 3
                             WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || ';%' THEN 3
-                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? THEN 3
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ?
+                                 AND LOWER(ws.definition_english) NOT LIKE '%' || ? || '''s%' THEN 3
                             WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
                             ELSE 4
                         END AS match_priority,
@@ -314,13 +334,79 @@ public struct DBService: DBServiceProtocol {
                             WHEN ws.definition_english LIKE '%(a sword%' OR ws.definition_english LIKE '%(sword%'
                                  OR ws.definition_english LIKE '%at one''s side%' THEN 6
                             ELSE 7
-                        END AS semantic_priority
+                        END AS semantic_priority,
+                        -- Idiom penalty: Demote idioms/proverbs with ratio expressions
+                        -- e.g., "in ninety-nine cases out of a hundred" → idiom, not direct translation
+                        CASE
+                            WHEN LOWER(ws.definition_english) LIKE '%out of%' THEN 1
+                            ELSE 0
+                        END AS idiom_priority
                     FROM dictionary_entries e
                     JOIN word_senses ws ON e.id = ws.entry_id
                     WHERE (
-                        LOWER(ws.definition_english) LIKE '%' || ? || '%'
+                        -- Word boundary matching: only match complete words, not substrings
+                        -- Matches: "ten", "ten;", "; ten", "ten,", etc.
+                        -- Does NOT match: "often", "listen", "tenacious"
+                        LOWER(ws.definition_english) = ?
+                        OR LOWER(ws.definition_english) LIKE ? || ' %'
+                        OR LOWER(ws.definition_english) LIKE ? || ';%'
+                        OR LOWER(ws.definition_english) LIKE ? || ',%'
+                        OR LOWER(ws.definition_english) LIKE ? || '.%'
+                        OR LOWER(ws.definition_english) LIKE ? || ')%'
+                        OR LOWER(ws.definition_english) LIKE '% ' || ? || ' %'
+                        OR LOWER(ws.definition_english) LIKE '% ' || ? || ';%'
+                        OR LOWER(ws.definition_english) LIKE '% ' || ? || ',%'
+                        OR LOWER(ws.definition_english) LIKE '% ' || ? || '.%'
+                        OR LOWER(ws.definition_english) LIKE '% ' || ? || ')%'
+                        OR LOWER(ws.definition_english) LIKE '% ' || ?
+                        OR LOWER(ws.definition_english) LIKE '%; ' || ?
+                        OR LOWER(ws.definition_english) LIKE '%,' || ?
+                        OR LOWER(ws.definition_english) LIKE '%(' || ?
                         OR COALESCE(ws.definition_chinese_simplified, '') LIKE '%' || ? || '%'
                         OR COALESCE(ws.definition_chinese_traditional, '') LIKE '%' || ? || '%'
+                    )
+                    -- Exclude possessive forms (e.g., exclude "one's" when searching "one")
+                    AND LOWER(ws.definition_english) NOT LIKE '%' || ? || '''s%'
+                    -- Exclude "[word] [number]" patterns for number queries
+                    -- Two-tier filtering: strict for one~five (often used as pronouns), lenient for six~twelve
+                    AND (
+                        -- Not a number query at all
+                        ? NOT IN ('one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve')
+                        -- Moderate filtering for six~twelve (less used as pronouns, but still filter examples)
+                        OR (
+                            ? IN ('six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve')
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' o''clock%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%part ' || ? || '%'
+                            -- Filter numbers in parentheses (examples): (approx. six feet), (e.g. six months)
+                            AND (LOWER(ws.definition_english) NOT LIKE '%(%' OR LOWER(ws.definition_english) NOT LIKE '% ' || ? || ' %')
+                            -- Filter time expressions: six months, six years (but keep "six-stringed", "six senses")
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' months%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' years%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' days%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' weeks%'
+                        )
+                        -- Lenient filtering for six and above (less commonly used as pronouns)
+                        OR (
+                            ? IN ('one', 'two', 'three', 'four', 'five')
+                            AND LOWER(ws.definition_english) NOT LIKE '%the ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%this ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%that ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%which ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%another ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%any ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%each ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%every ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%between ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%of ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%or ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%part ' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' o''clock%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%(%' || ? || '%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' days%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' weeks%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' months%'
+                            AND LOWER(ws.definition_english) NOT LIKE '%' || ? || ' years%'
+                        )
                     )
                 ),
                 aggregated AS (
@@ -330,6 +416,7 @@ public struct DBService: DBServiceProtocol {
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.semantic_priority) AS semantic_priority,
+                        MIN(c.idiom_priority) AS idiom_priority,
                         MIN(c.sense_order) AS first_matching_sense
                     FROM candidate c
                     GROUP BY c.id
@@ -343,17 +430,36 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 2: Main verb boost (基础动词优先)
+                    -- N5 SHORT words (≤3 chars) appear before their derivatives
+                    -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
+                    -- Note: Using N5 only since frequency data is not yet populated (all entries have freq=201)
+                    CASE
+                        WHEN e.jlpt_level = 'N5'
+                             AND LENGTH(e.headword) <= 3
+                        THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 2.5: JLPT existence (common words with JLPT > obscure words without JLPT)
+                    -- e.g., 売れる (N3) before 鬻ぐ (no JLPT - archaic)
+                    CASE
+                        WHEN e.jlpt_level IS NOT NULL THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 4: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     agg.first_matching_sense,
-                    -- Priority 4: Frequency (common words first, generalizable across all queries)
+                    -- Priority 4.5: Idiom penalty (direct translation > compound words > idioms)
+                    -- e.g., 百 before 百点 before 九分九厘
+                    agg.idiom_priority,
+                    -- Priority 5: Frequency (common words first, generalizable across all queries)
                     COALESCE(e.frequency_rank, 999999),
-                    -- Priority 5: Part-of-speech (verbs > nouns > other)
+                    -- Priority 6: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 6: Parenthetical semantic match
+                    -- Priority 7: Parenthetical semantic match
                     agg.parenthetical_priority,
-                    -- Priority 7: DEMOTE pure katakana (reverse of old logic)
+                    -- Priority 8: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -362,7 +468,7 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 8: Match quality
+                    -- Priority 9: Match quality
                     agg.match_priority,
                     -- Tie-breakers
                     e.created_at,
@@ -370,11 +476,62 @@ public struct DBService: DBServiceProtocol {
                 LIMIT ?
                 """
                 arguments = [
-                    lowerQuery, lowerQuery, lowerQuery,  // match_priority
-                    lowerQuery, lowerQuery,              // match_priority continued
-                    lowerQuery, lowerQuery, lowerQuery, lowerQuery,  // match_priority continued
+                    lowerQuery, lowerQuery, lowerQuery,  // match_priority: lines 272-274
+                    lowerQuery, lowerQuery,              // match_priority: lines 275-276 (with NOT LIKE)
+                    lowerQuery,                          // match_priority: line 277
+                    lowerQuery, lowerQuery,              // match_priority: lines 278-279 (with NOT LIKE)
+                    lowerQuery,                          // match_priority: line 280
+                    lowerQuery, lowerQuery,              // match_priority: lines 281-282 (with NOT LIKE)
+                    lowerQuery,                          // match_priority: line 283
                     lowerQuery, lowerQuery,              // parenthetical_priority
-                    lowerQuery, query, query,            // WHERE clause
+                    // WHERE clause: Word boundary matching (lines 328-345)
+                    lowerQuery,                          // Line 328: = ?
+                    lowerQuery,                          // Line 329: LIKE ? || ' %'
+                    lowerQuery,                          // Line 330: LIKE ? || ';%'
+                    lowerQuery,                          // Line 331: LIKE ? || ',%'
+                    lowerQuery,                          // Line 332: LIKE ? || '.%'
+                    lowerQuery,                          // Line 333: LIKE ? || ')%'
+                    lowerQuery,                          // Line 334: LIKE '% ' || ? || ' %'
+                    lowerQuery,                          // Line 335: LIKE '% ' || ? || ';%'
+                    lowerQuery,                          // Line 336: LIKE '% ' || ? || ',%'
+                    lowerQuery,                          // Line 337: LIKE '% ' || ? || '.%'
+                    lowerQuery,                          // Line 338: LIKE '% ' || ? || ')%'
+                    lowerQuery,                          // Line 339: LIKE '% ' || ?
+                    lowerQuery,                          // Line 340: LIKE '%; ' || ?
+                    lowerQuery,                          // Line 341: LIKE '%,' || ?
+                    lowerQuery,                          // Line 342: LIKE '%(' || ?
+                    query,                               // Line 343: Chinese simplified
+                    query,                               // Line 344: Chinese traditional
+                    lowerQuery,                          // WHERE clause: NOT LIKE possessive (line 347)
+                    // Two-tier number filtering (lines 335-370)
+                    lowerQuery,                          // Line 335: number check (NOT IN)
+                    lowerQuery,                          // Line 338: six~twelve check (IN)
+                    lowerQuery,                          // Line 339: o'clock (six~twelve)
+                    lowerQuery,                          // Line 340: part (six~twelve)
+                    lowerQuery,                          // Line 342: parentheses filter (six~twelve) - '% [num] %'
+                    lowerQuery,                          // Line 344: months (six~twelve)
+                    lowerQuery,                          // Line 345: years (six~twelve)
+                    lowerQuery,                          // Line 346: days (six~twelve)
+                    lowerQuery,                          // Line 347: weeks (six~twelve)
+                    lowerQuery,                          // Line 351: one~five check (IN)
+                    lowerQuery,                          // Line 345: the [num] (one~five)
+                    lowerQuery,                          // Line 346: this [num] (one~five)
+                    lowerQuery,                          // Line 347: that [num] (one~five)
+                    lowerQuery,                          // Line 348: which [num] (one~five)
+                    lowerQuery,                          // Line 349: another [num] (one~five)
+                    lowerQuery,                          // Line 350: any [num] (one~five)
+                    lowerQuery,                          // Line 351: each [num] (one~five)
+                    lowerQuery,                          // Line 352: every [num] (one~five)
+                    lowerQuery,                          // Line 353: between [num] (one~five)
+                    lowerQuery,                          // Line 354: of [num] (one~five)
+                    lowerQuery,                          // Line 355: or [num] (one~five)
+                    lowerQuery,                          // Line 356: part [num] (one~five)
+                    lowerQuery,                          // Line 357: [num] o'clock (one~five)
+                    lowerQuery,                          // Line 358: (... [num] ...) (one~five)
+                    lowerQuery,                          // Line 359: [num] days (one~five)
+                    lowerQuery,                          // Line 360: [num] weeks (one~five)
+                    lowerQuery,                          // Line 361: [num] months (one~five)
+                    lowerQuery,                          // Line 362: [num] years (one~five)
                 ]
                 // Add core headwords if provided
                 if !coreHeadwordsArray.isEmpty {

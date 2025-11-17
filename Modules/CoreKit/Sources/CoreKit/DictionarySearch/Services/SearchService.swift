@@ -33,11 +33,22 @@ public struct SearchService: SearchServiceProtocol {
         let scriptType = ScriptDetector.detect(sanitizedQuery)
         print("🔍 SearchService: query='\(sanitizedQuery)' scriptType=\(scriptType)")
 
+        // Detect if this looks like English/Chinese query BEFORE normalization
+        // This is important because English words shouldn't go through romaji conversion
+        let useReverseSearch = shouldTryReverseSearch(query: sanitizedQuery, scriptType: scriptType)
+        let isEnglishQuery = isLikelyEnglishQuery(query: sanitizedQuery, scriptType: scriptType)
+
         // Step 3: Normalize query
         let normalizedQuery: String
         switch scriptType {
         case .romaji:
-            normalizedQuery = RomajiConverter.normalizeForSearch(sanitizedQuery)
+            // IMPORTANT: Don't normalize English queries as romaji
+            // e.g., "six" should stay "six", not be converted to "shix"
+            if isEnglishQuery {
+                normalizedQuery = sanitizedQuery
+            } else {
+                normalizedQuery = RomajiConverter.normalizeForSearch(sanitizedQuery)
+            }
         default:
             // Convert katakana to hiragana for better matching
             // データ → でーた
@@ -47,10 +58,6 @@ public struct SearchService: SearchServiceProtocol {
         // Step 4: Execute database search
         let searchLimit = min(maxResults, 100)
         var dbResults: [DictionaryEntry] = []
-
-        // Detect if this looks like English/Chinese query for reverse search
-        let useReverseSearch = shouldTryReverseSearch(query: sanitizedQuery, scriptType: scriptType)
-        let isEnglishQuery = isLikelyEnglishQuery(query: sanitizedQuery, scriptType: scriptType)
         print("🔍 SearchService: useReverseSearch=\(useReverseSearch) for query='\(sanitizedQuery)'")
         if useReverseSearch {
             print("🔍 SearchService: isEnglishQuery=\(isEnglishQuery)")

@@ -75,6 +75,18 @@ public struct EnglishJapaneseMapping {
         "eye": ["目"],
         "ear": ["耳"],
         "mouth": ["口"],
+
+        // Numbers (基本数字)
+        "one": ["一"],
+        "two": ["二"],
+        "three": ["三"],
+        "four": ["四"],
+        "five": ["五"],
+        "six": ["六"],
+        "seven": ["七"],
+        "eight": ["八"],
+        "nine": ["九"],
+        "ten": ["十"],
     ]
 
     /// Semantic hints extracted from parenthetical queries

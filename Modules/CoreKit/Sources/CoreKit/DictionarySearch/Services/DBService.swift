@@ -38,11 +38,16 @@ public struct DBService: DBServiceProtocol {
                 if verbSuffixes.contains(where: { query.hasSuffix($0) }) {
                     // Extract stem by removing last character
                     let stem = String(query.dropLast())
-                    if !stem.isEmpty {
+                    // Only use stem matching if stem is at least 2 characters
+                    // This prevents over-matching for single-char stems like "す" from "する"
+                    // which would match 鋭い (するどい), 鯣 (するめ), etc.
+                    if stem.count >= 2 {
                         stemQuery = stem
                         // Combine queries: search for both "食べる*" OR "食べ*"
                         ftsQuery = query + "* OR " + stem + "*"
                         print("🔍 DBService: Verb detected. Stem: '\(stem)', FTS query: '\(ftsQuery)'")
+                    } else {
+                        print("🔍 DBService: Verb stem too short ('\(stem)'), skipping stem matching")
                     }
                 }
             }
@@ -51,24 +56,62 @@ public struct DBService: DBServiceProtocol {
             let sql = """
             SELECT e.*,
                 CASE
-                    WHEN e.headword = ? THEN 0
-                    WHEN e.reading_hiragana = ? THEN 1
-                    WHEN e.reading_romaji = ? THEN 2
-                    WHEN e.headword LIKE ? || '%' THEN 3
-                    WHEN e.reading_hiragana LIKE ? || '%' THEN 4
-                    ELSE 5
-                END AS match_priority
+                    -- Special: For する query, 為る (canonical suru verb) always comes first
+                    WHEN ? = 'する' AND e.headword = '為る' THEN 0
+                    -- Priority 1: Exact headword match (e.g., する itself if it exists)
+                    WHEN e.headword = ? THEN 1
+                    -- Priority 2: Headword prefix match (e.g., すると, するべき)
+                    WHEN e.headword LIKE ? || '%' THEN 2
+                    -- Priority 3: Reading exact match (e.g., 掏る, 刷る - homophones)
+                    WHEN e.reading_hiragana = ? THEN 3
+                    -- Priority 4: Romaji match
+                    WHEN e.reading_romaji = ? THEN 4
+                    -- Priority 5: Reading prefix match
+                    WHEN e.reading_hiragana LIKE ? || '%' THEN 5
+                    ELSE 6
+                END AS match_priority,
+                -- Suru-verb priority: For する query, prefer actual suru verbs over homophones
+                -- This is determined by checking if word_senses contains "suru verb"
+                (SELECT CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM word_senses ws
+                        WHERE ws.entry_id = e.id
+                        AND ws.part_of_speech LIKE '%suru verb%'
+                    ) THEN 0
+                    ELSE 1
+                END) AS suru_verb_priority
             FROM dictionary_entries e
             JOIN dictionary_fts fts ON e.id = fts.rowid
             WHERE dictionary_fts MATCH ?
             ORDER BY
                 match_priority ASC,
+                -- JLPT existence: words with JLPT levels come before those without
+                CASE WHEN e.jlpt_level IS NOT NULL THEN 0 ELSE 1 END ASC,
+                -- JLPT level priority: N5 > N4 > N3 > N2 > N1
+                -- IMPORTANT: 為る should be N5 (it's the canonical "to do" verb), but JMDict marks it as N3
+                -- This is a known data issue - override it here
+                CASE
+                    WHEN e.headword = '為る' THEN 0  -- Override: treat 為る as N5
+                    WHEN e.jlpt_level = 'N5' THEN 0
+                    WHEN e.jlpt_level = 'N4' THEN 1
+                    WHEN e.jlpt_level = 'N3' THEN 2
+                    WHEN e.jlpt_level = 'N2' THEN 3
+                    WHEN e.jlpt_level = 'N1' THEN 4
+                    ELSE 5
+                END ASC,
+                -- Katakana penalty: Demote katakana loanwords (するーぷ, するたん, etc.)
+                -- Only applies to words starting with katakana after the query prefix
+                -- e.g., for "する", penalize "するーぷ" but not "すると"
+                CASE
+                    WHEN e.headword GLOB ? || '[ァ-ヴー]*' THEN 1
+                    ELSE 0
+                END ASC,
                 COALESCE(e.frequency_rank, 999999) ASC,
                 LENGTH(e.headword) ASC
             LIMIT ?
             """
 
-            var entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: [query, query, query, query, query, ftsQuery, limit])
+            var entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: [query, query, query, query, query, query, ftsQuery, query, limit])
 
             // Only find reading-based variants if query is pure hiragana/katakana (reading search)
             // This prevents showing unrelated homonyms when searching with kanji
@@ -93,6 +136,15 @@ public struct DBService: DBServiceProtocol {
                 WHERE e.reading_hiragana = ?
                 ORDER BY
                     variant_priority ASC,
+                    CASE WHEN e.jlpt_level IS NOT NULL THEN 0 ELSE 1 END ASC,
+                    CASE
+                        WHEN e.jlpt_level = 'N5' THEN 0
+                        WHEN e.jlpt_level = 'N4' THEN 1
+                        WHEN e.jlpt_level = 'N3' THEN 2
+                        WHEN e.jlpt_level = 'N2' THEN 3
+                        WHEN e.jlpt_level = 'N1' THEN 4
+                        ELSE 5
+                    END ASC,
                     COALESCE(e.frequency_rank, 999999) ASC,
                     LENGTH(e.headword) ASC
                 """
@@ -128,6 +180,15 @@ public struct DBService: DBServiceProtocol {
                   AND e.reading_hiragana NOT LIKE ? || '%'
                   AND LENGTH(e.headword) <= ?
                 ORDER BY
+                    CASE WHEN e.jlpt_level IS NOT NULL THEN 0 ELSE 1 END ASC,
+                    CASE
+                        WHEN e.jlpt_level = 'N5' THEN 0
+                        WHEN e.jlpt_level = 'N4' THEN 1
+                        WHEN e.jlpt_level = 'N3' THEN 2
+                        WHEN e.jlpt_level = 'N2' THEN 3
+                        WHEN e.jlpt_level = 'N1' THEN 4
+                        ELSE 5
+                    END ASC,
                     COALESCE(e.frequency_rank, 999999) ASC,
                     LENGTH(e.headword) ASC
                 LIMIT ?
@@ -203,6 +264,36 @@ public struct DBService: DBServiceProtocol {
                     .order(Column("sense_order"))
                     .fetchAll(db)
                 entries[i].senses = senses
+            }
+
+            // Special handling for する query: Create virtual hiragana entry from 為る
+            // Problem: JMDict doesn't have a separate hiragana "する" entry - it only has kanji variant "為る"
+            // Solution: When user searches "する", create a virtual hiragana entry and put it first
+            if query == "する" {
+                // Check if hiragana する already exists in results
+                let hasHiraganaEntry = entries.contains { $0.headword == "する" }
+
+                if !hasHiraganaEntry {
+                    // Find 為る entry to clone from
+                    if let tameruEntry = entries.first(where: { $0.headword == "為る" }) {
+                        print("🔍 DBService: Creating virtual hiragana する entry from 為る")
+                        // Create virtual entry with negative ID to indicate it's synthetic
+                        let virtualEntry = DictionaryEntry(
+                            id: -1,  // Negative ID for virtual entry
+                            headword: "する",  // Change to hiragana
+                            readingHiragana: tameruEntry.readingHiragana,
+                            readingRomaji: tameruEntry.readingRomaji,
+                            frequencyRank: tameruEntry.frequencyRank,
+                            pitchAccent: tameruEntry.pitchAccent,
+                            jlptLevel: "N5",  // Override: する should be N5, not N3
+                            createdAt: tameruEntry.createdAt,
+                            senses: tameruEntry.senses  // Use same definitions
+                        )
+                        // Insert at beginning
+                        entries.insert(virtualEntry, at: 0)
+                        print("🔍 DBService: Virtual する entry created and inserted at position 0")
+                    }
+                }
             }
 
             return entries

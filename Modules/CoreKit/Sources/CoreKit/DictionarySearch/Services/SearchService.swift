@@ -172,11 +172,23 @@ public struct SearchService: SearchServiceProtocol {
             print("  \(index + 1). \(result.entry.headword) (bucket: \(result.bucket), score: \(result.relevanceScore))")
         }
 
-        // Step 6: Rank results (bucketed sorting: bucket first, then score)
+        // Step 6: Rank results
+        // IMPORTANT: Both forward and reverse search now use SQL-based ordering
+        // SQL ORDER BY provides comprehensive ranking:
+        //   Forward: match_priority → JLPT existence → JLPT level → frequency → length
+        //   Reverse: core native → main verb boost → JLPT existence → semantic → sense order → idiom → frequency → POS → parenthetical → katakana → match quality
         let ranked: [SearchResult]
+        ranked = searchResults
+        if useReverseSearch {
+            print("🔍 DEBUG SearchService: Reverse search - using SQL ordering (no client-side sort)")
+        } else {
+            print("🔍 DEBUG SearchService: Forward search - using SQL ordering (no client-side sort)")
+        }
+
+        // Old code (disabled): Client-side sorting that was overriding SQL's JLPT prioritization
+        /*
         if useReverseSearch {
             ranked = searchResults
-            print("🔍 DEBUG SearchService: Reverse search - NO sorting applied, using searchResults as-is")
         } else {
             ranked = searchResults.sorted { lhs, rhs in
                 // Primary: Bucket (A → B → C → D)
@@ -205,6 +217,7 @@ public struct SearchService: SearchServiceProtocol {
                 return lhs.entry.id < rhs.entry.id
             }
         }
+        */
 
         // Step 7: Limit to maxResults
         let finalResults = Array(ranked.prefix(maxResults))

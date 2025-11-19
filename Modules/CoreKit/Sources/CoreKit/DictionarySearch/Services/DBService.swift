@@ -60,16 +60,46 @@ public struct DBService: DBServiceProtocol {
                     WHEN ? = 'する' AND e.headword = '為る' THEN 0
                     -- Priority 1: Exact headword match (e.g., する itself if it exists)
                     WHEN e.headword = ? THEN 1
-                    -- Priority 2: Headword prefix match (e.g., すると, するべき)
-                    WHEN e.headword LIKE ? || '%' THEN 2
-                    -- Priority 3: Reading exact match (e.g., 掏る, 刷る - homophones)
-                    WHEN e.reading_hiragana = ? THEN 3
+                    -- Priority 2: Reading exact match (e.g., 掏る, 刷る - homophones, 漸と for やっと)
+                    -- BOOSTED: This now comes BEFORE prefix matches, so base words appear first
+                    WHEN e.reading_hiragana = ? THEN 2
+                    -- Priority 3: Headword prefix match (e.g., すると, するべき)
+                    WHEN e.headword LIKE ? || '%' THEN 3
                     -- Priority 4: Romaji match
                     WHEN e.reading_romaji = ? THEN 4
-                    -- Priority 5: Reading prefix match
+                    -- Priority 5: Reading prefix match (e.g., すると, するべき)
                     WHEN e.reading_hiragana LIKE ? || '%' THEN 5
                     ELSE 6
                 END AS match_priority,
+                -- Compound word detection: penalize unrelated homophones
+                -- True compounds use grammatical particles (の, で, と, に, が, を, etc.)
+                -- e.g., やっとの事で (compound) vs やっとこ (unrelated noun = pincers)
+                CASE
+                    -- Check if this is a prefix match (not exact)
+                    WHEN e.headword != ? AND e.reading_hiragana != ?
+                         AND (e.headword LIKE ? || '%' OR e.reading_hiragana LIKE ? || '%')
+                    THEN
+                        CASE
+                            -- Priority 0: Contains particles → true grammatical compound
+                            -- Pattern: [query]の, [query]で, [query]と, etc.
+                            WHEN e.reading_hiragana LIKE ? || 'の%'
+                              OR e.reading_hiragana LIKE ? || 'で%'
+                              OR e.reading_hiragana LIKE ? || 'と%'
+                              OR e.reading_hiragana LIKE ? || 'に%'
+                              OR e.reading_hiragana LIKE ? || 'が%'
+                              OR e.reading_hiragana LIKE ? || 'を%'
+                              OR e.reading_hiragana LIKE ? || 'から%'
+                              OR e.reading_hiragana LIKE ? || 'まで%'
+                            THEN 0
+                            -- Priority 1: Short extension (≤2 chars) → likely semantic compound
+                            -- e.g., やっと(3) → やっとこさ(5) = +2 chars
+                            WHEN LENGTH(e.reading_hiragana) - LENGTH(?) <= 2 THEN 1
+                            -- Priority 2: Longer extension (3+ chars) → likely unrelated
+                            -- e.g., やっと(3) → やっとかめ(5) = +2, but check other signals
+                            ELSE 2
+                        END
+                    ELSE 0  -- Not a prefix match, skip penalty
+                END AS compound_priority,
                 -- Suru-verb priority: For する query, prefer actual suru verbs over homophones
                 -- This is determined by checking if word_senses contains "suru verb"
                 (SELECT CASE
@@ -85,6 +115,8 @@ public struct DBService: DBServiceProtocol {
             WHERE dictionary_fts MATCH ?
             ORDER BY
                 match_priority ASC,
+                -- Compound word priority: true grammatical compounds > short compounds > unrelated homophones
+                compound_priority ASC,
                 -- JLPT existence: words with JLPT levels come before those without
                 CASE WHEN e.jlpt_level IS NOT NULL THEN 0 ELSE 1 END ASC,
                 -- JLPT level priority: N5 > N4 > N3 > N2 > N1
@@ -111,7 +143,15 @@ public struct DBService: DBServiceProtocol {
             LIMIT ?
             """
 
-            var entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: [query, query, query, query, query, query, ftsQuery, query, limit])
+            var entries = try DictionaryEntry.fetchAll(db, sql: sql, arguments: [
+                query, query, query, query, query, query,  // match_priority (6 params)
+                query, query, query, query,                 // compound_priority: check if prefix match (4 params)
+                query, query, query, query, query, query, query, query,  // compound_priority: particle checks (8 params)
+                query,                                      // compound_priority: length check (1 param)
+                ftsQuery,                                   // FTS MATCH query
+                query,                                      // katakana penalty
+                limit                                       // LIMIT
+            ])
 
             // Only find reading-based variants if query is pure hiragana/katakana (reading search)
             // This prevents showing unrelated homonyms when searching with kanji

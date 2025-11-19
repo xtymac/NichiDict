@@ -390,11 +390,39 @@ public struct DBService: DBServiceProtocol {
                             WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
                             ELSE 4
                         END AS match_priority,
-                        -- Parenthetical priority: "word (hint)" gets boost
+                        -- Parenthetical penalty: prioritize primary definitions over contextual usage
+                        -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
+                        -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
+                        -- Examples:
+                        --   - "examination; exam; test" → Priority 0 (primary)
+                        --   - "question (e.g. on a test)" → Priority 1 (contextual - inside parentheses)
+                        --   - "as a test; tentatively" → Priority 1 (contextual - "as a" usage)
+                        --   - "inspection (e.g. customs); test" → Priority 0 (test is NOT in the parentheses)
                         CASE
-                            WHEN LOWER(ws.definition_english) = ? THEN 0
-                            WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 0
-                            ELSE 1
+                            -- Check for "as a/an [query]" pattern: these are always contextual/secondary meanings
+                            -- Examples: "as a test", "as an experiment", "by way of a test"
+                            WHEN LOWER(ws.definition_english) LIKE '%as a ' || ? || '%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%as an ' || ? || '%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%by way of a ' || ? || '%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%by way of an ' || ? || '%' THEN 1
+                            -- Check if query appears inside parentheses: "(... query ...)"
+                            -- Must check for both "(" before AND ")" after the query word
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ' %'
+                                 AND LOWER(ws.definition_english) LIKE '%(' || ? || '%' || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ';%'
+                                 AND LOWER(ws.definition_english) LIKE '%(' || ? || '%' || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ',%'
+                                 AND LOWER(ws.definition_english) LIKE '%(' || ? || '%' || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%;' || ? || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%,' || ? || ')%' THEN 1
+                            -- Check for "e.g." pattern: only mark as parenthetical if query is BETWEEN "e.g." and ")"
+                            -- Pattern: "(e.g.% query%)" - ensures query is inside the e.g. parentheses
+                            WHEN LOWER(ws.definition_english) LIKE '%(e.g.%' || ? || '%' || ')%'
+                                 AND LOWER(ws.definition_english) NOT LIKE '%(e.g.%' || ')%' || ? || '%' THEN 1
+                            -- Otherwise, it's a primary definition
+                            ELSE 0
                         END AS parenthetical_priority,
                         -- Part-of-speech weight: verb=0, noun=1, other=2
                         CASE
@@ -521,7 +549,36 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: Main verb boost (基础动词优先)
+                    -- Priority 2: JLPT existence (common words with JLPT > obscure words without JLPT)
+                    -- e.g., 売れる (N3) before 鬻ぐ (no JLPT - archaic)
+                    CASE
+                        WHEN e.jlpt_level IS NOT NULL THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    agg.semantic_priority,
+                    -- Priority 4: Parenthetical penalty
+                    -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
+                    -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
+                    --   - 試験 (sense #1: "examination; exam; test") vs
+                    --   - 問題 (sense #1: "question (e.g. on a test)")
+                    agg.parenthetical_priority,
+                    -- Priority 5: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
+                    -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
+                    agg.first_matching_sense,
+                    -- Priority 6: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- For reverse search, prioritize more basic/common JLPT levels
+                    -- e.g., 試験 (N4: exam/test) before 検査 (N3: inspection/test)
+                    CASE
+                        WHEN e.jlpt_level = 'N5' THEN 0
+                        WHEN e.jlpt_level = 'N4' THEN 1
+                        WHEN e.jlpt_level = 'N3' THEN 2
+                        WHEN e.jlpt_level = 'N2' THEN 3
+                        WHEN e.jlpt_level = 'N1' THEN 4
+                        ELSE 5
+                    END,
+                    -- Priority 7: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
                     -- Note: Using N5 only since frequency data is not yet populated (all entries have freq=201)
@@ -531,26 +588,14 @@ public struct DBService: DBServiceProtocol {
                         THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2.5: JLPT existence (common words with JLPT > obscure words without JLPT)
-                    -- e.g., 売れる (N3) before 鬻ぐ (no JLPT - archaic)
-                    CASE
-                        WHEN e.jlpt_level IS NOT NULL THEN 0
-                        ELSE 1
-                    END,
-                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
-                    agg.semantic_priority,
-                    -- Priority 4: First matching sense (sense_order: 1st sense > 2nd sense > ...)
-                    agg.first_matching_sense,
-                    -- Priority 4.5: Idiom penalty (direct translation > compound words > idioms)
+                    -- Priority 8: Idiom penalty (direct translation > compound words > idioms)
                     -- e.g., 百 before 百点 before 九分九厘
                     agg.idiom_priority,
-                    -- Priority 5: Frequency (common words first, generalizable across all queries)
+                    -- Priority 9: Frequency (common words first, generalizable across all queries)
                     COALESCE(e.frequency_rank, 999999),
-                    -- Priority 6: Part-of-speech (verbs > nouns > other)
+                    -- Priority 10: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 7: Parenthetical semantic match
-                    agg.parenthetical_priority,
-                    -- Priority 8: DEMOTE pure katakana (reverse of old logic)
+                    -- Priority 11: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -559,7 +604,7 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 9: Match quality
+                    -- Priority 12: Match quality
                     agg.match_priority,
                     -- Tie-breakers
                     e.created_at,
@@ -574,7 +619,19 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery,                          // match_priority: line 280
                     lowerQuery, lowerQuery,              // match_priority: lines 281-282 (with NOT LIKE)
                     lowerQuery,                          // match_priority: line 283
-                    lowerQuery, lowerQuery,              // parenthetical_priority
+                    // parenthetical_priority (16 params: 4 for "as a/an" + 12 for parentheses)
+                    lowerQuery,                    // line 404: LIKE '%as a ' || ? || '%'
+                    lowerQuery,                    // line 405: LIKE '%as an ' || ? || '%'
+                    lowerQuery,                    // line 406: LIKE '%by way of a ' || ? || '%'
+                    lowerQuery,                    // line 407: LIKE '%by way of an ' || ? || '%'
+                    lowerQuery,                    // line 410: LIKE '%(' || ? || ')%'
+                    lowerQuery, lowerQuery,        // lines 411-412: LIKE '%(' || ? || ' %' AND LIKE '%(' || ? || '%' || ')%'
+                    lowerQuery, lowerQuery,        // lines 413-414: LIKE '%(' || ? || ';%' AND LIKE '%(' || ? || '%' || ')%'
+                    lowerQuery, lowerQuery,        // lines 415-416: LIKE '%(' || ? || ',%' AND LIKE '%(' || ? || '%' || ')%'
+                    lowerQuery,                    // line 417: LIKE '% ' || ? || ')%'
+                    lowerQuery,                    // line 418: LIKE '%;' || ? || ')%'
+                    lowerQuery,                    // line 419: LIKE '%,' || ? || ')%'
+                    lowerQuery, lowerQuery,        // lines 422-423: LIKE '%(e.g.%' || ? || '%' || ')%' AND NOT LIKE '%(e.g.%' || ')%' || ? || '%'
                     // WHERE clause: Word boundary matching (lines 328-345)
                     lowerQuery,                          // Line 328: = ?
                     lowerQuery,                          // Line 329: LIKE ? || ' %'
@@ -658,11 +715,39 @@ public struct DBService: DBServiceProtocol {
                             WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
                             ELSE 4
                         END AS match_priority,
-                        -- Parenthetical priority
+                        -- Parenthetical penalty: prioritize primary definitions over contextual usage
+                        -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
+                        -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
+                        -- Examples:
+                        --   - "examination; exam; test" → Priority 0 (primary)
+                        --   - "question (e.g. on a test)" → Priority 1 (contextual - inside parentheses)
+                        --   - "as a test; tentatively" → Priority 1 (contextual - "as a" usage)
+                        --   - "inspection (e.g. customs); test" → Priority 0 (test is NOT in the parentheses)
                         CASE
-                            WHEN LOWER(ws.definition_english) = ? THEN 0
-                            WHEN LOWER(ws.definition_english) LIKE ? || ' (%' THEN 0
-                            ELSE 1
+                            -- Check for "as a/an [query]" pattern: these are always contextual/secondary meanings
+                            -- Examples: "as a test", "as an experiment", "by way of a test"
+                            WHEN LOWER(ws.definition_english) LIKE '%as a ' || ? || '%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%as an ' || ? || '%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%by way of a ' || ? || '%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%by way of an ' || ? || '%' THEN 1
+                            -- Check if query appears inside parentheses: "(... query ...)"
+                            -- Must check for both "(" before AND ")" after the query word
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ' %'
+                                 AND LOWER(ws.definition_english) LIKE '%(' || ? || '%' || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ';%'
+                                 AND LOWER(ws.definition_english) LIKE '%(' || ? || '%' || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%(' || ? || ',%'
+                                 AND LOWER(ws.definition_english) LIKE '%(' || ? || '%' || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '% ' || ? || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%;' || ? || ')%' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%,' || ? || ')%' THEN 1
+                            -- Check for "e.g." pattern: only mark as parenthetical if query is BETWEEN "e.g." and ")"
+                            -- Pattern: "(e.g.% query%)" - ensures query is inside the e.g. parentheses
+                            WHEN LOWER(ws.definition_english) LIKE '%(e.g.%' || ? || '%' || ')%'
+                                 AND LOWER(ws.definition_english) NOT LIKE '%(e.g.%' || ')%' || ? || '%' THEN 1
+                            -- Otherwise, it's a primary definition
+                            ELSE 0
                         END AS parenthetical_priority,
                         -- Part-of-speech weight
                         CASE
@@ -753,7 +838,19 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery, lowerQuery, lowerQuery,  // match_priority
                     lowerQuery, lowerQuery,              // match_priority continued
                     lowerQuery, lowerQuery, lowerQuery, lowerQuery,  // match_priority continued
-                    lowerQuery, lowerQuery,              // parenthetical_priority
+                    // parenthetical_priority (16 params: 4 for "as a/an" + 12 for parentheses)
+                    lowerQuery,                    // line 729: LIKE '%as a ' || ? || '%'
+                    lowerQuery,                    // line 730: LIKE '%as an ' || ? || '%'
+                    lowerQuery,                    // line 731: LIKE '%by way of a ' || ? || '%'
+                    lowerQuery,                    // line 732: LIKE '%by way of an ' || ? || '%'
+                    lowerQuery,                    // line 735: LIKE '%(' || ? || ')%'
+                    lowerQuery, lowerQuery,        // lines 736-737: LIKE '%(' || ? || ' %' AND LIKE '%(' || ? || '%' || ')%'
+                    lowerQuery, lowerQuery,        // lines 738-739: LIKE '%(' || ? || ';%' AND LIKE '%(' || ? || '%' || ')%'
+                    lowerQuery, lowerQuery,        // lines 740-741: LIKE '%(' || ? || ',%' AND LIKE '%(' || ? || '%' || ')%'
+                    lowerQuery,                    // line 742: LIKE '% ' || ? || ')%'
+                    lowerQuery,                    // line 743: LIKE '%;' || ? || ')%'
+                    lowerQuery,                    // line 744: LIKE '%,' || ? || ')%'
+                    lowerQuery, lowerQuery,        // lines 747-748: LIKE '%(e.g.%' || ? || '%' || ')%' AND NOT LIKE '%(e.g.%' || ')%' || ? || '%'
                     lowerQuery,                          // WHERE clause
                 ]
                 // Add core headwords if provided

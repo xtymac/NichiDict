@@ -407,6 +407,9 @@ public final class LLMClient {
         - For sentence analysis: provide 2-3 similar example sentences in the "examples" array
         - Use「(推定)」for uncertain information
         - For Chinese/English input (e.g., "noon", "eat"), map to Japanese entries (e.g., 「正午」「昼」「食べる」「食う」)
+        - **CRITICAL FOR SENTENCE MODE**: If input is in English/Chinese, FIRST translate to Japanese, then analyze the Japanese sentence
+        - **In sentence mode, "original" field MUST be the Japanese sentence** (translated if needed)
+        - **wordBreakdown MUST break down the JAPANESE words**, not the input language
         - IMPORTANT: In wordBreakdown, use \(primaryLanguage) for "meaning" and "grammaticalRole" fields
         - IMPORTANT: In grammarPoints, use \(primaryLanguage) for "meaning" and "explanation" fields
 

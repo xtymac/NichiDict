@@ -13,7 +13,23 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
     
     // Related data (not stored in table, loaded separately)
     public var senses: [WordSense] = []
-    
+
+    // Computed property: Check if this is a rare kanji variant that's usually written in kana
+    // Examples: 漸と (usually やっと), 為る (usually する), 直ぐ (usually すぐ)
+    public var isRareKanji: Bool {
+        // List of words that are usually written in kana (uk = usually kana)
+        let usuallyKanaWords = [
+            "する", "やっと", "すぐ", "まだ", "もう", "ずっと",
+            "たくさん", "とても", "ちょっと", "どうぞ", "ちゃんと",
+            "きっと", "そっと", "はっきり", "しっかり", "ゆっくり"
+        ]
+
+        // Check if:
+        // 1. This entry's reading is in the usually-kana list
+        // 2. The headword is NOT the pure kana form (i.e., it's a kanji variant)
+        return usuallyKanaWords.contains(readingHiragana) && headword != readingHiragana
+    }
+
     // GRDB column mapping
     public enum Columns: String, ColumnExpression {
         case id, headword

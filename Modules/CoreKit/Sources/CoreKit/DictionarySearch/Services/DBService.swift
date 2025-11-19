@@ -306,37 +306,70 @@ public struct DBService: DBServiceProtocol {
                 entries[i].senses = senses
             }
 
-            // Special handling for する query: Create virtual hiragana entry from 為る
-            // Problem: JMDict doesn't have a separate hiragana "する" entry - it only has kanji variant "為る"
-            // Solution: When user searches "する", create a virtual hiragana entry and put it first
-            if query == "する" {
-                // Check if hiragana する already exists in results
-                let hasHiraganaEntry = entries.contains { $0.headword == "する" }
+            // Special handling for words that are usually written in kana but have rare kanji forms
+            // Examples: する→為る, やっと→漸と, すぐ→直ぐ
+            // Problem: JMDict often only has the kanji variant, not the common kana form
+            // Solution: Create virtual kana entries for common words that should appear first
+
+            // Define words that should have virtual kana entries (usually kana words)
+            let usuallyKanaWords: [String: (jlptLevel: String?, isAdverb: Bool)] = [
+                "する": ("N5", false),      // verb
+                "やっと": ("N4", true),     // adverb
+                "すぐ": ("N5", true),       // adverb
+                "まだ": ("N5", true),       // adverb
+                "もう": ("N5", true),       // adverb
+                "ずっと": ("N4", true),     // adverb
+                "たくさん": ("N5", true),   // adverb/na-adj
+                "とても": ("N5", true),     // adverb
+                "ちょっと": ("N5", true),   // adverb
+            ]
+
+            if let (jlptLevel, _) = usuallyKanaWords[query] {
+                // Check if pure hiragana entry already exists
+                let hasHiraganaEntry = entries.contains { $0.headword == query }
 
                 if !hasHiraganaEntry {
-                    // Find 為る entry to clone from
-                    if let tameruEntry = entries.first(where: { $0.headword == "為る" }) {
-                        print("🔍 DBService: Creating virtual hiragana する entry from 為る")
+                    // Find kanji variant to clone from (first entry with matching reading)
+                    if let kanjiEntry = entries.first(where: {
+                        $0.readingHiragana == query && $0.headword != query
+                    }) {
+                        print("🔍 DBService: Creating virtual hiragana '\(query)' entry from '\(kanjiEntry.headword)'")
                         // Create virtual entry with negative ID to indicate it's synthetic
                         let virtualEntry = DictionaryEntry(
                             id: -1,  // Negative ID for virtual entry
-                            headword: "する",  // Change to hiragana
-                            readingHiragana: tameruEntry.readingHiragana,
-                            readingRomaji: tameruEntry.readingRomaji,
-                            frequencyRank: tameruEntry.frequencyRank,
-                            pitchAccent: tameruEntry.pitchAccent,
-                            jlptLevel: "N5",  // Override: する should be N5, not N3
-                            createdAt: tameruEntry.createdAt,
-                            senses: tameruEntry.senses  // Use same definitions
+                            headword: query,  // Pure hiragana
+                            readingHiragana: kanjiEntry.readingHiragana,
+                            readingRomaji: kanjiEntry.readingRomaji,
+                            frequencyRank: kanjiEntry.frequencyRank,
+                            pitchAccent: kanjiEntry.pitchAccent,
+                            jlptLevel: jlptLevel,
+                            createdAt: kanjiEntry.createdAt,
+                            senses: kanjiEntry.senses  // Use same definitions
                         )
                         // Insert at beginning
                         entries.insert(virtualEntry, at: 0)
-                        print("🔍 DBService: Virtual する entry created and inserted at position 0")
+                        print("🔍 DBService: Virtual '\(query)' entry created and inserted at position 0")
                     }
                 }
             }
 
-            return entries
+            // Final sorting: demote rare kanji variants (uk = usually kana)
+            // Priority order: pure kana form > common kanji > rare kanji
+            // Example: やっと > [other compounds] > 漸と (rare kanji)
+            let finalEntries = entries.sorted { entry1, entry2 in
+                let isRare1 = entry1.isRareKanji
+                let isRare2 = entry2.isRareKanji
+
+                // Rule 1: Non-rare entries always come before rare ones
+                if isRare1 != isRare2 {
+                    return !isRare1  // true comes first, so !isRare1 means non-rare first
+                }
+
+                // Rule 2: If both are same rarity, preserve SQL order (stable sort)
+                return false
+            }
+
+            return finalEntries
         }
     }
 

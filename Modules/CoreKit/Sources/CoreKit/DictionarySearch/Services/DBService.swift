@@ -322,6 +322,10 @@ public struct DBService: DBServiceProtocol {
                 "たくさん": ("N5", true),   // adverb/na-adj
                 "とても": ("N5", true),     // adverb
                 "ちょっと": ("N5", true),   // adverb
+                "きっと": ("N4", true),     // adverb
+                "そっと": ("N3", true),     // adverb
+                "どうぞ": ("N5", true),     // adverb
+                "ちゃんと": ("N4", true),   // adverb
             ]
 
             if let (jlptLevel, _) = usuallyKanaWords[query] {

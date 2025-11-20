@@ -70,6 +70,8 @@ data/JMdict
 data/JMdict_e
 data/*.sqlite
 data/*.jsonl.gz
+data/tatoeba/*.csv
+data/tatoeba/*.tar.bz2
 
 # Test fixtures - large database files
 **/Fixtures/*.sqlite

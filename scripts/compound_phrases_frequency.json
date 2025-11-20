@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "source": "Common Compound Phrases with Core Words",
+    "description": "包含高频核心词的常用复合短语词频数据",
+    "strategy": "为包含高频词的复合短语赋予合理词频，确保搜索核心词时能正确排序",
+    "date": "2025-11-11"
+  },
+  "phrases": [
+    {
+      "headword": "また明日",
+      "reading": "またあした",
+      "rank": 50,
+      "core_word": "明日",
+      "note": "See you tomorrow - 搜索'あした'时应排前面"
+    },
+    {
+      "headword": "又ね",
+      "reading": "またね",
+      "rank": 60,
+      "core_word": "ね",
+      "note": "See you later - 常用告别语"
+    },
+    {
+      "headword": "もう一度",
+      "reading": "もういちど",
+      "rank": 80,
+      "core_word": "一度",
+      "note": "One more time - 极常用"
+    },
+    {
+      "headword": "もう少し",
+      "reading": "もうすこし",
+      "rank": 90,
+      "core_word": "少し",
+      "note": "A little more - 极常用"
+    },
+    {
+      "headword": "今日は",
+      "reading": "こんにちは",
+      "rank": 70,
+      "core_word": "今日",
+      "note": "Hello - 日常问候"
+    },
+    {
+      "headword": "今晩は",
+      "reading": "こんばんは",
+      "rank": 80,
+      "core_word": "今晩",
+      "note": "Good evening - 日常问候"
+    },
+    {
+      "headword": "お早う",
+      "reading": "おはよう",
+      "rank": 60,
+      "core_word": "早",
+      "note": "Good morning - 日常问候"
+    },
+    {
+      "headword": "有り難う",
+      "reading": "ありがとう",
+      "rank": 55,
+      "core_word": "有り難",
+      "note": "Thank you - 感谢"
+    },
+    {
+      "headword": "御免なさい",
+      "reading": "ごめんなさい",
+      "rank": 65,
+      "core_word": "御免",
+      "note": "I'm sorry - 道歉"
+    },
+    {
+      "headword": "何時も",
+      "reading": "いつも",
+      "rank": 100,
+      "core_word": "何時",
+      "note": "Always - 时间副词"
+    },
+    {
+      "headword": "全然",
+      "reading": "ぜんぜん",
+      "rank": 120,
+      "core_word": "全",
+      "note": "Not at all / Totally - 程度副词"
+    },
+    {
+      "headword": "本当",
+      "reading": "ほんとう",
+      "rank": 110,
+      "core_word": "本当",
+      "note": "Really / True - 强调"
+    },
+    {
+      "headword": "大変",
+      "reading": "たいへん",
+      "rank": 130,
+      "core_word": "大",
+      "note": "Very / Terrible - 程度副词"
+    },
+    {
+      "headword": "沢山",
+      "reading": "たくさん",
+      "rank": 140,
+      "core_word": "沢",
+      "note": "A lot / Many - 数量副词"
+    },
+    {
+      "headword": "少し",
+      "reading": "すこし",
+      "rank": 150,
+      "core_word": "少",
+      "note": "A little - 数量副词"
+    },
+    {
+      "headword": "一寸",
+      "reading": "ちょっと",
+      "rank": 160,
+      "core_word": "一",
+      "note": "A bit / Excuse me - 常用副词"
+    },
+    {
+      "headword": "多分",
+      "reading": "たぶん",
+      "rank": 170,
+      "core_word": "多",
+      "note": "Probably - 推测副词"
+    },
+    {
+      "headword": "勿論",
+      "reading": "もちろん",
+      "rank": 180,
+      "core_word": "勿",
+      "note": "Of course - 肯定副词"
+    },
+    {
+      "headword": "矢張り",
+      "reading": "やっぱり",
+      "rank": 190,
+      "core_word": "矢",
+      "note": "As expected - 确认副词"
+    },
+    {
+      "headword": "流石",
+      "reading": "さすが",
+      "rank": 200,
+      "core_word": "流",
+      "note": "As expected (from someone skilled) - 赞叹"
+    }
+  ]
+}

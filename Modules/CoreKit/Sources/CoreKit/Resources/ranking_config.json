@@ -1,0 +1,270 @@
+{
+  "version": "1.0",
+  "profile": "default",
+  "useLegacyScorer": false,
+
+  "features": [
+    {
+      "type": "exactMatch",
+      "weight": 1.0,
+      "minScore": 0,
+      "maxScore": 100,
+      "enabled": true
+    },
+    {
+      "type": "lemmaMatch",
+      "weight": 1.0,
+      "minScore": 0,
+      "maxScore": 35,
+      "enabled": true
+    },
+    {
+      "type": "prefixMatch",
+      "weight": 1.0,
+      "minScore": 0,
+      "maxScore": 30,
+      "enabled": true
+    },
+    {
+      "type": "containsMatch",
+      "weight": 1.0,
+      "minScore": 0,
+      "maxScore": 10,
+      "enabled": true
+    },
+    {
+      "type": "jlpt",
+      "weight": 0.8,
+      "minScore": 0,
+      "maxScore": 15,
+      "enabled": true,
+      "parameters": {
+        "levels": {
+          "N5": 10.0,
+          "N4": 7.0,
+          "N3": 4.0,
+          "N2": 2.0,
+          "N1": 0.0
+        }
+      }
+    },
+    {
+      "type": "frequency",
+      "weight": 1.2,
+      "minScore": 0,
+      "maxScore": 15,
+      "enabled": true,
+      "parameters": {
+        "smoothing": "sigmoid",
+        "midpoint": 5.0
+      }
+    },
+    {
+      "type": "posPriority",
+      "weight": 0.9,
+      "minScore": 0,
+      "maxScore": 8,
+      "enabled": true,
+      "parameters": {
+        "scores": {
+          "verb": 8.0,
+          "adjective": 7.0,
+          "i-adjective": 7.0,
+          "na-adjective": 7.0,
+          "noun": 5.0,
+          "adverb": 4.0,
+          "particle": 2.0,
+          "auxiliary": 1.0,
+          "conjunction": 1.0,
+          "suffix": 0.5,
+          "prefix": 0.5
+        }
+      }
+    },
+    {
+      "type": "commonWord",
+      "weight": 0.7,
+      "minScore": 0,
+      "maxScore": 5,
+      "enabled": true,
+      "parameters": {
+        "thresholds": {
+          "100": 5.0,
+          "500": 3.0,
+          "2000": 1.5,
+          "5000": 0.5
+        }
+      }
+    },
+    {
+      "type": "entryType",
+      "weight": 0.6,
+      "minScore": 0,
+      "maxScore": 4,
+      "enabled": true,
+      "parameters": {
+        "scores": {
+          "word": 4.0,
+          "compound": 2.0,
+          "expression": 1.0,
+          "phrase": 0.5
+        }
+      }
+    },
+    {
+      "type": "surfaceLength",
+      "weight": 0.5,
+      "minScore": -5,
+      "maxScore": 0,
+      "enabled": true,
+      "parameters": {
+        "optimalLength": 3,
+        "penaltyRate": 0.5
+      }
+    },
+    {
+      "type": "commonPatternPenalty",
+      "weight": 1.0,
+      "minScore": -10,
+      "maxScore": 0,
+      "enabled": true,
+      "parameters": {
+        "patterns": {
+          "する": -3.0,
+          "させる": -2.0,
+          "られる": -2.0,
+          "ている": -2.0,
+          "ぽい": -2.0,
+          "らしい": -2.0,
+          "っぽい": -2.0,
+          "もの": -1.5,
+          "こと": -1.5,
+          "やつ": -1.5,
+          "〜的": -2.0,
+          "〜化": -2.0,
+          "〜性": -2.0
+        }
+      }
+    },
+    {
+      "type": "rareWordPenalty",
+      "weight": 0.8,
+      "minScore": -8,
+      "maxScore": 0,
+      "enabled": true,
+      "parameters": {
+        "rareThreshold": 10000,
+        "penaltyRate": 0.001
+      }
+    },
+    {
+      "type": "archaicWordPenalty",
+      "weight": 1.0,
+      "minScore": -12,
+      "maxScore": 0,
+      "enabled": true,
+      "parameters": {
+        "archaicTags": ["archaic", "obsolete", "rare", "old-fashioned", "dated", "archaism", "古語", "廃語"],
+        "archaicPenalty": -12.0
+      }
+    },
+    {
+      "type": "specializedDomainPenalty",
+      "weight": 0.7,
+      "minScore": -6,
+      "maxScore": 0,
+      "enabled": true,
+      "parameters": {
+        "domainTags": ["medicine", "law", "chemistry", "physics", "mathematics", "computer", "engineering", "biology", "astronomy", "geology", "anatomy", "botany", "zoology", "医学", "法律", "化学", "物理学", "数学", "計算機"],
+        "penalty": -6.0
+      }
+    },
+    {
+      "type": "vulgarSlangPenalty",
+      "weight": 0.9,
+      "minScore": -8,
+      "maxScore": 0,
+      "enabled": true,
+      "parameters": {
+        "vulgarTags": ["vulgar", "slang", "colloquial", "derogatory", "crude", "obscene", "offensive", "俗語", "卑語", "下品"],
+        "penalty": -8.0
+      }
+    }
+  ],
+
+  "hardRules": [
+    {
+      "type": "exactMatchBucket",
+      "priority": 1,
+      "enabled": true
+    },
+    {
+      "type": "lemmaMatchBucket",
+      "priority": 2,
+      "enabled": true
+    },
+    {
+      "type": "expressionBucket",
+      "priority": 3,
+      "enabled": true,
+      "parameters": {
+        "expressionTags": ["expression", "expressions", "phrase", "idiom", "saying", "proverb", "成句", "慣用句", "熟語"]
+      }
+    },
+    {
+      "type": "commonPrefixBucket",
+      "priority": 4,
+      "enabled": true,
+      "parameters": {
+        "frequencyThreshold": 2000
+      }
+    },
+    {
+      "type": "jlptBucket",
+      "priority": 5,
+      "enabled": true,
+      "parameters": {
+        "eligibleLevels": ["N5", "N4"]
+      }
+    },
+    {
+      "type": "specializedDomainBucket",
+      "priority": 10,
+      "enabled": true,
+      "parameters": {
+        "domainTags": ["medicine", "law", "chemistry", "physics", "mathematics", "computer", "engineering", "biology", "astronomy", "geology", "anatomy", "botany", "zoology", "医学", "法律", "化学", "物理学", "数学", "計算機"]
+      }
+    },
+    {
+      "type": "archaicWordBucket",
+      "priority": 11,
+      "enabled": true,
+      "parameters": {
+        "archaicTags": ["archaic", "obsolete", "rare", "old-fashioned", "dated", "archaism", "古語", "廃語"]
+      }
+    }
+  ],
+
+  "tieBreakers": [
+    {
+      "field": "frequencyRank",
+      "order": "ascending"
+    },
+    {
+      "field": "jlptBonus",
+      "order": "descending"
+    },
+    {
+      "field": "surfaceLength",
+      "order": "ascending"
+    },
+    {
+      "field": "createdAt",
+      "order": "ascending"
+    },
+    {
+      "field": "id",
+      "order": "ascending"
+    }
+  ]
+}

@@ -511,6 +511,44 @@ public struct DBService: DBServiceProtocol {
                             WHEN ws.part_of_speech LIKE '%noun%' THEN 1
                             ELSE 2
                         END AS pos_weight,
+                        -- Conjunction priority: distinguish causative (因果) vs adversative (逆接) conjunctions
+                        -- Priority 0: Causative/sequential conjunctions (順接): so/therefore/accordingly
+                        --             だから、それで、ですから、其処で、それ故
+                        -- Priority 1: Other conjunctions
+                        -- Priority 2: Adversative conjunctions (逆接): but/however/nevertheless/still
+                        --             でも、しかし、けれども、所が (demoted for "so" searches)
+                        -- Priority 3: Other parts of speech
+                        CASE
+                            -- Priority 0: Causative/sequential conjunctions (順接)
+                            WHEN ws.part_of_speech LIKE '%conjunction%'
+                                 AND (LOWER(ws.definition_english) LIKE '%therefore%'
+                                      OR LOWER(ws.definition_english) LIKE '%accordingly%'
+                                      OR LOWER(ws.definition_english) LIKE '%consequently%'
+                                      OR LOWER(ws.definition_english) LIKE '%for that reason%'
+                                      OR LOWER(ws.definition_english) LIKE '%on those grounds%'
+                                      OR LOWER(ws.definition_english) LIKE '%that is why%'
+                                      OR LOWER(ws.definition_english) LIKE '%(and) then%')
+                            THEN 0
+                            -- Priority 2: Adversative conjunctions (逆接) - DEMOTE
+                            WHEN ws.part_of_speech LIKE '%conjunction%'
+                                 AND (LOWER(ws.definition_english) LIKE 'but;%'
+                                      OR LOWER(ws.definition_english) = 'but'
+                                      OR LOWER(ws.definition_english) LIKE 'however;%'
+                                      OR LOWER(ws.definition_english) = 'however'
+                                      OR LOWER(ws.definition_english) LIKE '%but;%'
+                                      OR LOWER(ws.definition_english) LIKE '%however;%'
+                                      OR LOWER(ws.definition_english) LIKE '%nevertheless;%'
+                                      OR LOWER(ws.definition_english) LIKE '%even so;%'
+                                      OR LOWER(ws.definition_english) LIKE '%still;%'
+                                      OR LOWER(ws.definition_english) LIKE '%even though;%'
+                                      OR LOWER(ws.definition_english) LIKE '%on the contrary%'
+                                      OR LOWER(ws.definition_english) LIKE '%though;%')
+                            THEN 2
+                            -- Priority 1: Other conjunctions (neutral)
+                            WHEN ws.part_of_speech LIKE '%conjunction%' THEN 1
+                            -- Priority 3: Other parts of speech
+                            ELSE 3
+                        END AS conjunction_priority,
                         -- Semantic category priority: prioritize by real-world usage frequency
                         -- Order: 着る > 履く > 掛ける > 締める > 下げる > 為る > 差す
                         CASE
@@ -615,6 +653,7 @@ public struct DBService: DBServiceProtocol {
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
+                        MIN(c.conjunction_priority) AS conjunction_priority,
                         MIN(c.semantic_priority) AS semantic_priority,
                         MIN(c.idiom_priority) AS idiom_priority,
                         MIN(c.sense_order) AS first_matching_sense
@@ -644,11 +683,21 @@ public struct DBService: DBServiceProtocol {
                     --   - 試験 (sense #1: "examination; exam; test") vs
                     --   - 問題 (sense #1: "question (e.g. on a test)")
                     agg.parenthetical_priority,
-                    -- Priority 5: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 5: Conjunction priority (logical conjunctions before conversational transitions)
+                    -- For queries like "so", "but", "however", "therefore"
+                    -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
+                    -- CRITICAL: Must come BEFORE JLPT level to ensure semantic relevance > common usage level
+                    agg.conjunction_priority,
+                    -- Priority 6: Match quality (word position in definition)
+                    -- CRITICAL: Must come BEFORE JLPT level to prioritize semantic relevance
+                    -- e.g., for "so": それで (def starts with "so") before でも (def contains "even so" at end)
+                    -- This ensures primary meanings rank higher than secondary mentions
+                    agg.match_priority,
+                    -- Priority 7: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
                     -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
                     agg.first_matching_sense,
-                    -- Priority 6: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- Priority 8: JLPT level priority (N5 > N4 > N3 > N2 > N1)
                     -- For reverse search, prioritize more basic/common JLPT levels
                     -- e.g., 試験 (N4: exam/test) before 検査 (N3: inspection/test)
                     CASE
@@ -659,7 +708,7 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level = 'N1' THEN 4
                         ELSE 5
                     END,
-                    -- Priority 7: Main verb boost (基础动词优先)
+                    -- Priority 9: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
                     -- Note: Using N5 only since frequency data is not yet populated (all entries have freq=201)
@@ -669,14 +718,14 @@ public struct DBService: DBServiceProtocol {
                         THEN 0
                         ELSE 1
                     END,
-                    -- Priority 8: Idiom penalty (direct translation > compound words > idioms)
+                    -- Priority 10: Idiom penalty (direct translation > compound words > idioms)
                     -- e.g., 百 before 百点 before 九分九厘
                     agg.idiom_priority,
-                    -- Priority 9: Frequency (common words first, generalizable across all queries)
+                    -- Priority 11: Frequency (common words first, generalizable across all queries)
                     COALESCE(e.frequency_rank, 999999),
-                    -- Priority 10: Part-of-speech (verbs > nouns > other)
+                    -- Priority 12: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 11: DEMOTE pure katakana (reverse of old logic)
+                    -- Priority 13: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -685,8 +734,6 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 12: Match quality
-                    agg.match_priority,
                     -- Tie-breakers
                     e.created_at,
                     e.id
@@ -870,6 +917,7 @@ public struct DBService: DBServiceProtocol {
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
+                        MIN(c.conjunction_priority) AS conjunction_priority,
                         MIN(c.semantic_priority) AS semantic_priority,
                         MIN(c.sense_order) AS first_matching_sense
                     FROM candidate c
@@ -888,16 +936,18 @@ public struct DBService: DBServiceProtocol {
                     agg.semantic_priority,
                     -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     agg.first_matching_sense,
-                    -- Priority 4: Part-of-speech
+                    -- Priority 4: Conjunction priority (conjunctions first for linking words)
+                    agg.conjunction_priority,
+                    -- Priority 5: Part-of-speech
                     agg.pos_weight,
-                    -- Priority 5: Parenthetical semantic match
+                    -- Priority 6: Parenthetical semantic match
                     agg.parenthetical_priority,
-                    -- Priority 6: Common words
+                    -- Priority 7: Common words
                     CASE
                         WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
                         ELSE 1
                     END,
-                    -- Priority 7: DEMOTE pure katakana
+                    -- Priority 8: DEMOTE pure katakana
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -906,9 +956,9 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 8: Match quality
+                    -- Priority 9: Match quality
                     agg.match_priority,
-                    -- Priority 9: Frequency
+                    -- Priority 10: Frequency
                     COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,

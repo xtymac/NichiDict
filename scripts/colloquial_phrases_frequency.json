@@ -1,0 +1,234 @@
+{
+  "metadata": {
+    "source": "Common Japanese Colloquial Expressions",
+    "description": "手动整理的日语口语高频短语词频数据",
+    "date": "2025-11-11",
+    "rank_offset": 50
+  },
+  "phrases": [
+    {
+      "headword": "また明日",
+      "reading": "またあした",
+      "rank": 50,
+      "category": "daily_greeting",
+      "note": "See you tomorrow - 极常用的告别语"
+    },
+    {
+      "headword": "おはよう",
+      "reading": "おはよう",
+      "rank": 60,
+      "category": "daily_greeting",
+      "note": "Good morning - 日常问候"
+    },
+    {
+      "headword": "こんにちは",
+      "reading": "こんにちは",
+      "rank": 70,
+      "category": "daily_greeting",
+      "note": "Hello - 日常问候"
+    },
+    {
+      "headword": "こんばんは",
+      "reading": "こんばんは",
+      "rank": 80,
+      "category": "daily_greeting",
+      "note": "Good evening - 日常问候"
+    },
+    {
+      "headword": "さようなら",
+      "reading": "さようなら",
+      "rank": 90,
+      "category": "daily_greeting",
+      "note": "Goodbye - 告别语"
+    },
+    {
+      "headword": "ありがとう",
+      "reading": "ありがとう",
+      "rank": 55,
+      "category": "daily_expression",
+      "note": "Thank you - 感谢表达"
+    },
+    {
+      "headword": "ごめんなさい",
+      "reading": "ごめんなさい",
+      "rank": 65,
+      "category": "daily_expression",
+      "note": "I'm sorry - 道歉表达"
+    },
+    {
+      "headword": "お願いします",
+      "reading": "おねがいします",
+      "rank": 75,
+      "category": "daily_expression",
+      "note": "Please - 请求表达"
+    },
+    {
+      "headword": "いただきます",
+      "reading": "いただきます",
+      "rank": 85,
+      "category": "daily_expression",
+      "note": "Before eating - 用餐前"
+    },
+    {
+      "headword": "ごちそうさま",
+      "reading": "ごちそうさま",
+      "rank": 95,
+      "category": "daily_expression",
+      "note": "After eating - 用餐后"
+    },
+    {
+      "headword": "お疲れ様",
+      "reading": "おつかれさま",
+      "rank": 100,
+      "category": "daily_expression",
+      "note": "Good work - 辛苦了"
+    },
+    {
+      "headword": "頑張って",
+      "reading": "がんばって",
+      "rank": 110,
+      "category": "encouragement",
+      "note": "Do your best - 加油"
+    },
+    {
+      "headword": "気をつけて",
+      "reading": "きをつけて",
+      "rank": 120,
+      "category": "daily_expression",
+      "note": "Take care - 小心"
+    },
+    {
+      "headword": "今日明日",
+      "reading": "きょうあす",
+      "rank": 250,
+      "category": "time_expression",
+      "note": "today and tomorrow - 时间短语"
+    },
+    {
+      "headword": "今明日",
+      "reading": "こんみょうにち",
+      "rank": 350,
+      "category": "time_expression",
+      "note": "today and/or tomorrow - 时间短语"
+    },
+    {
+      "headword": "大明日",
+      "reading": "だいみょうにち",
+      "rank": 500,
+      "category": "time_expression",
+      "note": "very auspicious day - 吉日"
+    },
+    {
+      "headword": "お元気ですか",
+      "reading": "おげんきですか",
+      "rank": 130,
+      "category": "daily_greeting",
+      "note": "How are you? - 问候语"
+    },
+    {
+      "headword": "久しぶり",
+      "reading": "ひさしぶり",
+      "rank": 140,
+      "category": "daily_greeting",
+      "note": "Long time no see - 问候语"
+    },
+    {
+      "headword": "よろしく",
+      "reading": "よろしく",
+      "rank": 150,
+      "category": "daily_expression",
+      "note": "Nice to meet you / Please - 常用表达"
+    },
+    {
+      "headword": "大丈夫",
+      "reading": "だいじょうぶ",
+      "rank": 160,
+      "category": "daily_expression",
+      "note": "It's okay / Are you alright? - 常用表达"
+    },
+    {
+      "headword": "どういたしまして",
+      "reading": "どういたしまして",
+      "rank": 170,
+      "category": "daily_expression",
+      "note": "You're welcome - 回应感谢"
+    },
+    {
+      "headword": "そうですか",
+      "reading": "そうですか",
+      "rank": 180,
+      "category": "conversation",
+      "note": "Is that so? - 对话回应"
+    },
+    {
+      "headword": "そうですね",
+      "reading": "そうですね",
+      "rank": 190,
+      "category": "conversation",
+      "note": "I agree / Let me see - 对话回应"
+    },
+    {
+      "headword": "なるほど",
+      "reading": "なるほど",
+      "rank": 200,
+      "category": "conversation",
+      "note": "I see / I understand - 理解表达"
+    },
+    {
+      "headword": "本当に",
+      "reading": "ほんとうに",
+      "rank": 210,
+      "category": "emphasis",
+      "note": "Really / Truly - 强调副词"
+    },
+    {
+      "headword": "ちょっと",
+      "reading": "ちょっと",
+      "rank": 220,
+      "category": "daily_expression",
+      "note": "A little / Excuse me - 常用副词"
+    },
+    {
+      "headword": "もちろん",
+      "reading": "もちろん",
+      "rank": 230,
+      "category": "daily_expression",
+      "note": "Of course - 肯定表达"
+    },
+    {
+      "headword": "たぶん",
+      "reading": "たぶん",
+      "rank": 240,
+      "category": "daily_expression",
+      "note": "Probably / Maybe - 推测副词"
+    },
+    {
+      "headword": "いってきます",
+      "reading": "いってきます",
+      "rank": 105,
+      "category": "daily_greeting",
+      "note": "I'm leaving (and will return) - 出门告别"
+    },
+    {
+      "headword": "いってらっしゃい",
+      "reading": "いってらっしゃい",
+      "rank": 115,
+      "category": "daily_greeting",
+      "note": "Have a good day / See you later - 送别语"
+    },
+    {
+      "headword": "ただいま",
+      "reading": "ただいま",
+      "rank": 125,
+      "category": "daily_greeting",
+      "note": "I'm home - 回家问候"
+    },
+    {
+      "headword": "お帰りなさい",
+      "reading": "おかえりなさい",
+      "rank": 135,
+      "category": "daily_greeting",
+      "note": "Welcome home - 迎接回家"
+    }
+  ]
+}

@@ -21,7 +21,8 @@ public struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord,
         let usuallyKanaWords = [
             "する", "やっと", "すぐ", "まだ", "もう", "ずっと",
             "たくさん", "とても", "ちょっと", "どうぞ", "ちゃんと",
-            "きっと", "そっと", "はっきり", "しっかり", "ゆっくり"
+            "きっと", "そっと", "はっきり", "しっかり", "ゆっくり",
+            "やっぱり", "やはり"
         ]
 
         // Check if:

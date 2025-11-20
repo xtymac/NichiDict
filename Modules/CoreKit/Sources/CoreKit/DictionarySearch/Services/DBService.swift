@@ -326,6 +326,8 @@ public struct DBService: DBServiceProtocol {
                 "そっと": ("N3", true),     // adverb
                 "どうぞ": ("N5", true),     // adverb
                 "ちゃんと": ("N4", true),   // adverb
+                "やっぱり": ("N4", true),   // adverb
+                "やはり": ("N4", true),     // adverb
             ]
 
             if let (jlptLevel, _) = usuallyKanaWords[query] {
@@ -338,9 +340,11 @@ public struct DBService: DBServiceProtocol {
                         $0.readingHiragana == query && $0.headword != query
                     }) {
                         print("🔍 DBService: Creating virtual hiragana '\(query)' entry from '\(kanjiEntry.headword)'")
-                        // Create virtual entry with negative ID to indicate it's synthetic
+                        // Create virtual entry using the REAL entry's ID
+                        // This allows fetchEntry to work correctly when user taps the entry
+                        // The only difference is the headword (pure kana vs kanji)
                         let virtualEntry = DictionaryEntry(
-                            id: -1,  // Negative ID for virtual entry
+                            id: kanjiEntry.id,  // Use real ID so fetchEntry works
                             headword: query,  // Pure hiragana
                             readingHiragana: kanjiEntry.readingHiragana,
                             readingRomaji: kanjiEntry.readingRomaji,
@@ -1293,13 +1297,13 @@ public struct DBService: DBServiceProtocol {
             guard var entry = try DictionaryEntry.fetchOne(db, id: id) else {
                 return nil
             }
-            
+
             // Fetch senses
             let senses = try WordSense
                 .filter(WordSense.Columns.entryId == id)
                 .order(WordSense.Columns.senseOrder)
                 .fetchAll(db)
-            
+
             // For each sense, fetch examples using raw SQL
             var sensesWithExamples: [WordSense] = []
             for var sense in senses {
@@ -1312,8 +1316,27 @@ public struct DBService: DBServiceProtocol {
                 sense.examples = examples
                 sensesWithExamples.append(sense)
             }
-            
+
             entry.senses = sensesWithExamples
+
+            // Special handling: If this is a rare kanji entry (usually written in kana),
+            // return a virtual entry with pure kana headword
+            // This ensures consistency with search results that show virtual entries
+            if entry.isRareKanji {
+                print("🔍 DBService.fetchEntry: Entry '\(entry.headword)' is rare kanji, returning virtual kana entry '\(entry.readingHiragana)'")
+                return DictionaryEntry(
+                    id: entry.id,
+                    headword: entry.readingHiragana,  // Use pure kana
+                    readingHiragana: entry.readingHiragana,
+                    readingRomaji: entry.readingRomaji,
+                    frequencyRank: entry.frequencyRank,
+                    pitchAccent: entry.pitchAccent,
+                    jlptLevel: entry.jlptLevel,
+                    createdAt: entry.createdAt,
+                    senses: entry.senses
+                )
+            }
+
             return entry
         }
     }

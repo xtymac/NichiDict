@@ -328,6 +328,7 @@ public struct DBService: DBServiceProtocol {
                 "ちゃんと": ("N4", true),   // adverb
                 "やっぱり": ("N4", true),   // adverb
                 "やはり": ("N4", true),     // adverb
+                "それで": ("N4", false),    // conjunction (rare kanji: 其れで)
             ]
 
             if let (jlptLevel, _) = usuallyKanaWords[query] {
@@ -1190,8 +1191,37 @@ public struct DBService: DBServiceProtocol {
                 print("  \(index + 1). \(entry.headword) \(isCore ? "✓ CORE" : "")")
             }
 
-            print("🗄️ DBService.searchReverse: Returning \(filteredEntries.count) filtered entries")
-            return filteredEntries
+            // Convert rare kanji forms to kana in search results
+            // Examples: 其れで → それで, 漸と → やっと, 矢っ張り → やっぱり
+            let usuallyKanaWords = [
+                "する", "やっと", "すぐ", "まだ", "もう", "ずっと",
+                "たくさん", "とても", "ちょっと", "どうぞ", "ちゃんと",
+                "きっと", "そっと", "はっきり", "しっかり", "ゆっくり",
+                "やっぱり", "やはり", "それで"
+            ]
+
+            let convertedEntries = filteredEntries.map { entry -> DictionaryEntry in
+                // Check if this is a rare kanji form that should be displayed as kana
+                if usuallyKanaWords.contains(entry.readingHiragana) && entry.headword != entry.readingHiragana {
+                    print("🔄 Converting rare kanji '\(entry.headword)' to kana '\(entry.readingHiragana)'")
+                    // Create a new entry with kana headword but same ID (for detail view)
+                    return DictionaryEntry(
+                        id: entry.id,
+                        headword: entry.readingHiragana,  // Use kana form
+                        readingHiragana: entry.readingHiragana,
+                        readingRomaji: entry.readingRomaji,
+                        frequencyRank: entry.frequencyRank,
+                        pitchAccent: entry.pitchAccent,
+                        jlptLevel: entry.jlptLevel,
+                        createdAt: entry.createdAt,
+                        senses: entry.senses
+                    )
+                }
+                return entry
+            }
+
+            print("🗄️ DBService.searchReverse: Returning \(convertedEntries.count) filtered entries")
+            return convertedEntries
         }
     }
 

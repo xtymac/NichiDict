@@ -306,20 +306,29 @@ public struct DBService: DBServiceProtocol {
                 entries[i].senses = senses
             }
 
-            // Final sorting: use database variant_type for display priority
-            // Priority: uk (usually kana) > primary > ateji > rK (rare) > oK (old) > iK/io > sK
-            // This is now database-driven via DictionaryEntry.displayPriority
-            // Examples: やっと (uk) > compounds > 漸と (rK)
+            // Final sorting: exact matches first, then variant priority for same-reading entries
+            // 1. Exact headword match comes first (e.g., 為る before 病気に為る)
+            // 2. For entries with same reading, sort by displayPriority (uk > primary > rK)
+            // 3. Otherwise preserve SQL order (which handles match_priority, JLPT, frequency)
             let finalEntries = entries.sorted { entry1, entry2 in
-                let priority1 = entry1.displayPriority
-                let priority2 = entry2.displayPriority
-
-                // Sort by variant display priority (lower = higher priority)
-                if priority1 != priority2 {
-                    return priority1 < priority2
+                // Rule 1: Exact headword match comes first
+                let isExact1 = entry1.headword == query || entry1.readingHiragana == query
+                let isExact2 = entry2.headword == query || entry2.readingHiragana == query
+                if isExact1 != isExact2 {
+                    return isExact1  // Exact match comes first
                 }
 
-                // If same priority, preserve SQL order (stable sort)
+                // Rule 2: For same-reading entries (variants), sort by displayPriority
+                // This ensures やっと (uk) > 漸と (rK) when both have reading やっと
+                if entry1.readingHiragana == entry2.readingHiragana {
+                    let priority1 = entry1.displayPriority
+                    let priority2 = entry2.displayPriority
+                    if priority1 != priority2 {
+                        return priority1 < priority2
+                    }
+                }
+
+                // Rule 3: Preserve SQL order (stable sort)
                 return false
             }
 

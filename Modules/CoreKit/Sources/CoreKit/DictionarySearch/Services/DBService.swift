@@ -306,75 +306,20 @@ public struct DBService: DBServiceProtocol {
                 entries[i].senses = senses
             }
 
-            // Special handling for words that are usually written in kana but have rare kanji forms
-            // Examples: する→為る, やっと→漸と, すぐ→直ぐ
-            // Problem: JMDict often only has the kanji variant, not the common kana form
-            // Solution: Create virtual kana entries for common words that should appear first
-
-            // Define words that should have virtual kana entries (usually kana words)
-            let usuallyKanaWords: [String: (jlptLevel: String?, isAdverb: Bool)] = [
-                "する": ("N5", false),      // verb
-                "やっと": ("N4", true),     // adverb
-                "すぐ": ("N5", true),       // adverb
-                "まだ": ("N5", true),       // adverb
-                "もう": ("N5", true),       // adverb
-                "ずっと": ("N4", true),     // adverb
-                "たくさん": ("N5", true),   // adverb/na-adj
-                "とても": ("N5", true),     // adverb
-                "ちょっと": ("N5", true),   // adverb
-                "きっと": ("N4", true),     // adverb
-                "そっと": ("N3", true),     // adverb
-                "どうぞ": ("N5", true),     // adverb
-                "ちゃんと": ("N4", true),   // adverb
-                "やっぱり": ("N4", true),   // adverb
-                "やはり": ("N4", true),     // adverb
-                "それで": ("N4", false),    // conjunction (rare kanji: 其れで)
-            ]
-
-            if let (jlptLevel, _) = usuallyKanaWords[query] {
-                // Check if pure hiragana entry already exists
-                let hasHiraganaEntry = entries.contains { $0.headword == query }
-
-                if !hasHiraganaEntry {
-                    // Find kanji variant to clone from (first entry with matching reading)
-                    if let kanjiEntry = entries.first(where: {
-                        $0.readingHiragana == query && $0.headword != query
-                    }) {
-                        print("🔍 DBService: Creating virtual hiragana '\(query)' entry from '\(kanjiEntry.headword)'")
-                        // Create virtual entry using the REAL entry's ID
-                        // This allows fetchEntry to work correctly when user taps the entry
-                        // The only difference is the headword (pure kana vs kanji)
-                        let virtualEntry = DictionaryEntry(
-                            id: kanjiEntry.id,  // Use real ID so fetchEntry works
-                            headword: query,  // Pure hiragana
-                            readingHiragana: kanjiEntry.readingHiragana,
-                            readingRomaji: kanjiEntry.readingRomaji,
-                            frequencyRank: kanjiEntry.frequencyRank,
-                            pitchAccent: kanjiEntry.pitchAccent,
-                            jlptLevel: jlptLevel,
-                            createdAt: kanjiEntry.createdAt,
-                            senses: kanjiEntry.senses  // Use same definitions
-                        )
-                        // Insert at beginning
-                        entries.insert(virtualEntry, at: 0)
-                        print("🔍 DBService: Virtual '\(query)' entry created and inserted at position 0")
-                    }
-                }
-            }
-
-            // Final sorting: demote rare kanji variants (uk = usually kana)
-            // Priority order: pure kana form > common kanji > rare kanji
-            // Example: やっと > [other compounds] > 漸と (rare kanji)
+            // Final sorting: use database variant_type for display priority
+            // Priority: uk (usually kana) > primary > ateji > rK (rare) > oK (old) > iK/io > sK
+            // This is now database-driven via DictionaryEntry.displayPriority
+            // Examples: やっと (uk) > compounds > 漸と (rK)
             let finalEntries = entries.sorted { entry1, entry2 in
-                let isRare1 = entry1.isRareKanji
-                let isRare2 = entry2.isRareKanji
+                let priority1 = entry1.displayPriority
+                let priority2 = entry2.displayPriority
 
-                // Rule 1: Non-rare entries always come before rare ones
-                if isRare1 != isRare2 {
-                    return !isRare1  // true comes first, so !isRare1 means non-rare first
+                // Sort by variant display priority (lower = higher priority)
+                if priority1 != priority2 {
+                    return priority1 < priority2
                 }
 
-                // Rule 2: If both are same rarity, preserve SQL order (stable sort)
+                // If same priority, preserve SQL order (stable sort)
                 return false
             }
 
@@ -1192,28 +1137,23 @@ public struct DBService: DBServiceProtocol {
             }
 
             // Convert rare kanji forms to kana in search results
+            // Uses database variant_type: uk (usually kana), rK (rare kanji), oK (old kanji)
             // Examples: 其れで → それで, 漸と → やっと, 矢っ張り → やっぱり
-            let usuallyKanaWords = [
-                "する", "やっと", "すぐ", "まだ", "もう", "ずっと",
-                "たくさん", "とても", "ちょっと", "どうぞ", "ちゃんと",
-                "きっと", "そっと", "はっきり", "しっかり", "ゆっくり",
-                "やっぱり", "やはり", "それで"
-            ]
-
             let convertedEntries = filteredEntries.map { entry -> DictionaryEntry in
-                // Check if this is a rare kanji form that should be displayed as kana
-                if usuallyKanaWords.contains(entry.readingHiragana) && entry.headword != entry.readingHiragana {
-                    print("🔄 Converting rare kanji '\(entry.headword)' to kana '\(entry.readingHiragana)'")
-                    // Create a new entry with kana headword but same ID (for detail view)
+                // Use database-driven displayHeadword which checks variant_type
+                let displayHead = entry.displayHeadword
+                if displayHead != entry.headword {
+                    print("🔄 Converting '\(entry.headword)' (variant: \(entry.variantType?.rawValue ?? "nil")) to '\(displayHead)'")
                     return DictionaryEntry(
                         id: entry.id,
-                        headword: entry.readingHiragana,  // Use kana form
+                        headword: displayHead,
                         readingHiragana: entry.readingHiragana,
                         readingRomaji: entry.readingRomaji,
                         frequencyRank: entry.frequencyRank,
                         pitchAccent: entry.pitchAccent,
                         jlptLevel: entry.jlptLevel,
                         createdAt: entry.createdAt,
+                        variantType: entry.variantType,
                         senses: entry.senses
                     )
                 }

@@ -43,6 +43,37 @@ CREATE TABLE dictionary_entries (
 - `reading_romaji`: Always Hepburn romanization for consistent output
 - `frequency_rank`: Lower = more common (1-100000), NULL for rare/archaic words
 - `pitch_accent`: Uses downstep arrows (↓) to indicate pitch drops per clarification
+- `variant_type`: JMDict variant classification (see Variant Type System below)
+- `jlpt_level`: JLPT level (N5, N4, N3, N2, N1)
+
+### Variant Type System (Added 2025-11)
+
+The `variant_type` column classifies kanji spellings based on JMDict ke_inf tags:
+
+| Value | Description | Display Priority | Display Behavior |
+|-------|-------------|------------------|------------------|
+| `uk` | Usually written in kana | 1 (highest) | Show kana form |
+| `primary` | Normal/common spelling | 2 | Show original |
+| `ateji` | Phonetic kanji usage | 3 | Show original |
+| `rK` | Rarely used kanji | 4 | Show kana form |
+| `oK` | Outdated/old kanji | 5 | Show kana form |
+| `iK` | Irregular kanji | 6 | Show original |
+| `io` | Irregular okurigana | 6 | Show original |
+| `sK` | Search-only kanji | 7 (lowest) | Hidden from results |
+
+**Sorting Rules**:
+1. **Exact match first**: Entries where `headword == query` or `reading == query` rank highest
+2. **Same-reading variants**: For entries with identical reading, sort by `displayPriority`
+3. **Preserve SQL order**: Otherwise maintain match_priority, JLPT, frequency ranking
+
+**Example**: Searching「やっと」returns:
+1. やっと (uk) ← kana form first
+2. 漸と (rK) ← rare kanji last
+
+**Example**: Searching「為る」returns:
+1. 為る (する) ← exact headword match
+2. 為る (なる) ← exact headword match
+3. 病気に為る ← compound expression
 
 #### 2. `word_senses`
 
@@ -141,6 +172,32 @@ END;
 import Foundation
 import GRDB
 
+// MARK: - VariantType
+
+/// JMDict variant classification for kanji spellings
+enum VariantType: String, Codable, Sendable {
+    case primary = "primary"  // Normal/common spelling
+    case uk = "uk"            // Usually written in kana
+    case rK = "rK"            // Rarely used kanji
+    case oK = "oK"            // Outdated/old kanji
+    case sK = "sK"            // Search-only kanji
+    case iK = "iK"            // Irregular kanji
+    case io = "io"            // Irregular okurigana
+    case ateji = "ateji"      // Phonetic kanji usage
+
+    var displayPriority: Int {
+        switch self {
+        case .uk: return 1      // Usually kana - most preferred
+        case .primary: return 2  // Normal spelling
+        case .ateji: return 3    // Ateji
+        case .rK: return 4       // Rare kanji
+        case .oK: return 5       // Old kanji
+        case .iK, .io: return 6  // Irregular usage
+        case .sK: return 7       // Search-only
+        }
+    }
+}
+
 // MARK: - DictionaryEntry
 
 struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord, PersistableRecord {
@@ -150,10 +207,22 @@ struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord, Persis
     let readingRomaji: String
     let frequencyRank: Int?
     let pitchAccent: String?
+    let jlptLevel: String?
     let createdAt: Int
+    let variantType: VariantType?
 
     // Related data (not stored in table, loaded separately)
     var senses: [WordSense] = []
+
+    // Computed: display headword based on variant type
+    var displayHeadword: String {
+        switch variantType {
+        case .uk, .rK, .oK, .sK:
+            return readingHiragana  // Show kana form
+        default:
+            return headword         // Show original
+        }
+    }
 
     // GRDB column mapping
     enum Columns: String, ColumnExpression {
@@ -162,7 +231,9 @@ struct DictionaryEntry: Identifiable, Codable, Hashable, FetchableRecord, Persis
         case readingRomaji = "reading_romaji"
         case frequencyRank = "frequency_rank"
         case pitchAccent = "pitch_accent"
+        case jlptLevel = "jlpt_level"
         case createdAt = "created_at"
+        case variantType = "variant_type"
     }
 
     static let databaseTableName = "dictionary_entries"
@@ -334,6 +405,12 @@ enum ValidationError: Error {
 4. **FTS5 index**: Automatically created by `dictionary_fts` virtual table
    - Handles prefix queries efficiently (`taberu*`)
    - BM25 ranking with column weighting
+
+5. **Variant ranking**: `idx_variant_ranking` on `dictionary_entries(variant_type, jlpt_level, frequency_rank)`
+   - Used for sorting by variant priority, JLPT level, then frequency
+
+6. **Reading variant lookup**: `idx_reading_variant` on `dictionary_entries(reading_hiragana, variant_type)`
+   - Used for finding all variants of a given reading
 
 ### Query Patterns
 

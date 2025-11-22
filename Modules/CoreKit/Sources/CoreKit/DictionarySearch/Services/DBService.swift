@@ -449,6 +449,12 @@ public struct DBService: DBServiceProtocol {
                 } else {
                     print("🗄️ DBService.searchReverse: Detected base verb '\(afterTo)', core headwords: \(coreHeadwordsArray)")
                 }
+            } else {
+                // Try direct mapping for non-verb queries (e.g., "world", "house", "person")
+                coreHeadwordsArray = self.getCoreHeadwordsForQuery(lowerQuery)
+                if !coreHeadwordsArray.isEmpty {
+                    print("🗄️ DBService.searchReverse: Found core headwords for '\(lowerQuery)': \(coreHeadwordsArray)")
+                }
             }
 
             // Merge with any explicitly provided core headwords
@@ -1403,6 +1409,9 @@ public struct DBService: DBServiceProtocol {
 
             // Existence (fundamental copulas)
             "be": ["いる", "ある"],
+
+            // Basic N4 Nouns
+            "world": ["世界"],
         ]
 
         return coreWordsMap[lowerQuery] ?? []

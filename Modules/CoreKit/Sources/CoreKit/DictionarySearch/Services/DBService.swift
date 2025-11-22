@@ -297,13 +297,27 @@ public struct DBService: DBServiceProtocol {
                 }
             }
 
-            // Load senses for each entry
+            // Load senses and examples for each entry
             for i in 0..<entries.count {
                 let senses = try WordSense
                     .filter(Column("entry_id") == entries[i].id)
                     .order(Column("sense_order"))
                     .fetchAll(db)
-                entries[i].senses = senses
+
+                // Load examples for each sense
+                var sensesWithExamples: [WordSense] = []
+                for var sense in senses {
+                    let sql = """
+                    SELECT * FROM example_sentences
+                    WHERE sense_id = ?
+                    ORDER BY example_order
+                    """
+                    let examples = try ExampleSentence.fetchAll(db, sql: sql, arguments: [sense.id])
+                    sense.examples = examples
+                    sensesWithExamples.append(sense)
+                }
+
+                entries[i].senses = sensesWithExamples
             }
 
             // Special handling for words that are usually written in kana but have rare kanji forms

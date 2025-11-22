@@ -138,6 +138,24 @@ public struct DBService: DBServiceProtocol {
                     WHEN e.headword GLOB ? || '[ァ-ヴー]*' THEN 1
                     ELSE 0
                 END ASC,
+                -- Rare kanji penalty: Demote academic/literary compounds with uncommon kanji
+                -- These kanji are outside 常用漢字 and appear mainly in classical/academic contexts
+                -- Examples: 韜晦 (concealing), 躊躇 (hesitation), 揶揄 (ridicule), etc.
+                -- About 90% of native speakers don't recognize these characters
+                CASE
+                    WHEN INSTR(e.headword, '韜') > 0 OR INSTR(e.headword, '晦') > 0
+                         OR INSTR(e.headword, '躊') > 0 OR INSTR(e.headword, '躇') > 0
+                         OR INSTR(e.headword, '憚') > 0 OR INSTR(e.headword, '瞠') > 0
+                         OR INSTR(e.headword, '嘯') > 0 OR INSTR(e.headword, '囁') > 0
+                         OR INSTR(e.headword, '竦') > 0 OR INSTR(e.headword, '戮') > 0
+                         OR INSTR(e.headword, '慄') > 0 OR INSTR(e.headword, '謗') > 0
+                         OR INSTR(e.headword, '詭') > 0 OR INSTR(e.headword, '諌') > 0
+                         OR INSTR(e.headword, '蘊') > 0 OR INSTR(e.headword, '揶') > 0
+                         OR INSTR(e.headword, '揄') > 0 OR INSTR(e.headword, '逡') > 0
+                         OR INSTR(e.headword, '巡') > 0 AND INSTR(e.headword, '逡巡') > 0
+                    THEN 1
+                    ELSE 0
+                END ASC,
                 COALESCE(e.frequency_rank, 999999) ASC,
                 LENGTH(e.headword) ASC
             LIMIT ?

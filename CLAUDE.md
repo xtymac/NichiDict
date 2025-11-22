@@ -34,4 +34,16 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - Added `phrasal_penalty` field to detect phrases like "after all", "if only", "so that"
 - Adjusted search priority: phrasal_penalty → match_priority → JLPT level → conjunction_priority
 - Ensures learners see common, direct translations before specialized idiomatic usages
+
+**Semantic boosting system** (2025-11-22): For contextual disambiguation, users can provide semantic hints:
+- Search "treat (请客)" or "treat (food)" → boosts entries with "(esp. food and drink)" or "someone to dinner"
+- Search "wear (shoes)" → boosts entries with "(lower-body)" or "(footwear)"
+- Hint extraction: parentheses or Chinese characters (e.g., 请客 = "invite to dinner")
+
+**Implementation** ([DBService.swift:1285](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L1285)):
+- Added `semantic_boost` field to prioritize entries matching semantic keywords from user hints
+- Maps Chinese hints to English patterns: 请客 → ["%food and drink%", "%someone to%dinner%"]
+- Extracts keywords from parentheses: "treat (food, meal)" → boosts definitions with "food" or "meal"
+- Priority order: phrasal_penalty → semantic_boost → match_priority → JLPT level
+- Ensures learners see contextually relevant translations first (ごちそう before 苛める for "treat (food)")
 <!-- MANUAL ADDITIONS END -->

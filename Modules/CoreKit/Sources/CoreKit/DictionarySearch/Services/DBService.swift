@@ -402,6 +402,10 @@ public struct DBService: DBServiceProtocol {
             let lowerQuery = query.lowercased()
             print("🗄️ DBService.searchReverse: lowerQuery='\(lowerQuery)'")
 
+            // Extract semantic keywords from hint for boosting
+            let semanticKeywords = semanticHint.map { self.getSemanticKeywordsFromHint($0, baseQuery: lowerQuery) } ?? []
+            print("🗄️ DBService.searchReverse: semanticKeywords=\(semanticKeywords)")
+
             // Check if we have Chinese columns (multilingual database)
             let hasChineseColumns = try Bool.fetchOne(db, sql: """
                 SELECT COUNT(*) > 0
@@ -486,6 +490,17 @@ public struct DBService: DBServiceProtocol {
                             WHEN LOWER(ws.definition_english) LIKE '%even though%' AND ? = 'though' THEN 1
                             ELSE 0
                         END AS phrasal_penalty,
+                        -- Semantic boost: Prioritize entries with matching semantic markers
+                        -- Example: "treat" + hint "请客" → boost "(esp. food and drink)" or "someone to dinner"
+                        -- Priority 0: Definition contains semantic keywords from hint (BOOSTED)
+                        -- Priority 1: No semantic match (NORMAL)
+                        CASE
+                            -- Check if definition contains any semantic keywords
+                            \(semanticKeywords.isEmpty ? "WHEN 0 THEN 1" : semanticKeywords.enumerated().map { index, _ in
+                                "WHEN LOWER(ws.definition_english) LIKE ? THEN 0"
+                            }.joined(separator: "\n                            "))
+                            ELSE 1
+                        END AS semantic_boost,
                         -- Parenthetical penalty: prioritize primary definitions over contextual usage
                         -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
                         -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
@@ -667,6 +682,7 @@ public struct DBService: DBServiceProtocol {
                         c.id,
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.phrasal_penalty) AS phrasal_penalty,
+                        MIN(c.semantic_boost) AS semantic_boost,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
@@ -696,11 +712,16 @@ public struct DBService: DBServiceProtocol {
                     -- This ensures core words with direct translations rank higher
                     -- e.g., 全部 (all) before 更に (after all)
                     agg.phrasal_penalty,
-                    -- Priority 4: Match quality (word position in definition)
+                    -- Priority 4: Semantic boost (NEW - for contextual hints)
+                    -- Boost entries with matching semantic markers from user hints
+                    -- e.g., "treat" + hint "请客" → boost "(esp. food and drink)"
+                    -- 0 = boosted (contains semantic keywords), 1 = normal
+                    agg.semantic_boost,
+                    -- Priority 5: Match quality (word position in definition)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- e.g., for "all": 全部 (def="all; entire") before 更に (def contains "after all")
                     agg.match_priority,
-                    -- Priority 5: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- Priority 6: JLPT level priority (N5 > N4 > N3 > N2 > N1)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- Prioritizes common vocabulary over grammatical conjunctions
                     -- e.g., 全部 (N5: all) before 更に (N3: furthermore; after all)
@@ -712,23 +733,23 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level = 'N1' THEN 4
                         ELSE 5
                     END,
-                    -- Priority 6: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 7: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 7: Parenthetical penalty
+                    -- Priority 8: Parenthetical penalty
                     -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
                     -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
                     --   - 試験 (sense #1: "examination; exam; test") vs
                     --   - 問題 (sense #1: "question (e.g. on a test)")
                     agg.parenthetical_priority,
-                    -- Priority 8: Conjunction priority (logical conjunctions before conversational transitions)
+                    -- Priority 9: Conjunction priority (logical conjunctions before conversational transitions)
                     -- For queries like "so", "but", "however", "therefore"
                     -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
                     agg.conjunction_priority,
-                    -- Priority 9: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 10: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
                     -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
                     agg.first_matching_sense,
-                    -- Priority 9: Main verb boost (基础动词优先)
+                    -- Priority 11: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
                     -- Note: Using N5 only since frequency data is not yet populated (all entries have freq=201)
@@ -738,14 +759,14 @@ public struct DBService: DBServiceProtocol {
                         THEN 0
                         ELSE 1
                     END,
-                    -- Priority 10: Idiom penalty (direct translation > compound words > idioms)
+                    -- Priority 12: Idiom penalty (direct translation > compound words > idioms)
                     -- e.g., 百 before 百点 before 九分九厘
                     agg.idiom_priority,
-                    -- Priority 11: Frequency (common words first, generalizable across all queries)
+                    -- Priority 13: Frequency (common words first, generalizable across all queries)
                     COALESCE(e.frequency_rank, 999999),
-                    -- Priority 12: Part-of-speech (verbs > nouns > other)
+                    -- Priority 14: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 13: DEMOTE pure katakana (reverse of old logic)
+                    -- Priority 15: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -777,7 +798,11 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery,                    // line 488: 'and yet' AND ? = 'yet'
                     lowerQuery,                    // line 489: 'and still' AND ? = 'still'
                     lowerQuery,                    // line 490: 'even though' AND ? = 'though'
-                    // parenthetical_priority (16 params: 4 for "as a/an" + 12 for parentheses)
+                ]
+                // Add semantic keywords for semantic_boost (dynamic count based on keywords)
+                arguments.append(contentsOf: semanticKeywords.map { $0 as DatabaseValueConvertible })
+                // parenthetical_priority (16 params: 4 for "as a/an" + 12 for parentheses)
+                arguments.append(contentsOf: [
                     lowerQuery,                    // line 404: LIKE '%as a ' || ? || '%'
                     lowerQuery,                    // line 405: LIKE '%as an ' || ? || '%'
                     lowerQuery,                    // line 406: LIKE '%by way of a ' || ? || '%'
@@ -838,7 +863,7 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery,                          // Line 360: [num] weeks (one~five)
                     lowerQuery,                          // Line 361: [num] months (one~five)
                     lowerQuery,                          // Line 362: [num] years (one~five)
-                ]
+                ])
                 // Add core headwords if provided
                 if !coreHeadwordsArray.isEmpty {
                     arguments.append(contentsOf: coreHeadwordsArray.map { $0 as DatabaseValueConvertible })
@@ -907,6 +932,17 @@ public struct DBService: DBServiceProtocol {
                             -- Otherwise, it's a primary definition
                             ELSE 0
                         END AS parenthetical_priority,
+                        -- Semantic boost: Prioritize entries with matching semantic markers
+                        -- Example: "treat" + hint "请客" → boost "(esp. food and drink)" or "someone to dinner"
+                        -- Priority 0: Definition contains semantic keywords from hint (BOOSTED)
+                        -- Priority 1: No semantic match (NORMAL)
+                        CASE
+                            -- Check if definition contains any semantic keywords
+                            \(semanticKeywords.isEmpty ? "WHEN 0 THEN 1" : semanticKeywords.enumerated().map { index, _ in
+                                "WHEN LOWER(ws.definition_english) LIKE ? THEN 0"
+                            }.joined(separator: "\n                            "))
+                            ELSE 1
+                        END AS semantic_boost,
                         -- Part-of-speech weight
                         CASE
                             WHEN ws.part_of_speech LIKE '%verb%' THEN 0
@@ -946,6 +982,7 @@ public struct DBService: DBServiceProtocol {
                         c.id,
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
+                        MIN(c.semantic_boost) AS semantic_boost,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
                         MIN(c.semantic_priority) AS semantic_priority,
@@ -962,22 +999,26 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 2: Semantic boost (contextual hints)
+                    -- Boost entries with matching semantic markers from user hints
+                    -- 0 = boosted (contains semantic keywords), 1 = normal
+                    agg.semantic_boost,
+                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 4: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     agg.first_matching_sense,
-                    -- Priority 4: Conjunction priority (conjunctions first for linking words)
+                    -- Priority 5: Conjunction priority (conjunctions first for linking words)
                     agg.conjunction_priority,
-                    -- Priority 5: Part-of-speech
+                    -- Priority 6: Part-of-speech
                     agg.pos_weight,
-                    -- Priority 6: Parenthetical semantic match
+                    -- Priority 7: Parenthetical semantic match
                     agg.parenthetical_priority,
-                    -- Priority 7: Common words
+                    -- Priority 8: Common words
                     CASE
                         WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
                         ELSE 1
                     END,
-                    -- Priority 8: DEMOTE pure katakana
+                    -- Priority 9: DEMOTE pure katakana
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -986,9 +1027,9 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 9: Match quality
+                    -- Priority 10: Match quality
                     agg.match_priority,
-                    -- Priority 10: Frequency
+                    -- Priority 11: Frequency
                     COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,
@@ -1012,8 +1053,10 @@ public struct DBService: DBServiceProtocol {
                     lowerQuery,                    // line 743: LIKE '%;' || ? || ')%'
                     lowerQuery,                    // line 744: LIKE '%,' || ? || ')%'
                     lowerQuery, lowerQuery,        // lines 747-748: LIKE '%(e.g.%' || ? || '%' || ')%' AND NOT LIKE '%(e.g.%' || ')%' || ? || '%'
-                    lowerQuery,                          // WHERE clause
                 ]
+                // Add semantic keywords for semantic_boost (dynamic count based on keywords)
+                arguments.append(contentsOf: semanticKeywords.map { $0 as DatabaseValueConvertible })
+                arguments.append(lowerQuery)  // WHERE clause
                 // Add core headwords if provided
                 if !coreHeadwordsArray.isEmpty {
                     arguments.append(contentsOf: coreHeadwordsArray.map { $0 as DatabaseValueConvertible })
@@ -1252,6 +1295,65 @@ public struct DBService: DBServiceProtocol {
             print("🗄️ DBService.searchReverse: Returning \(convertedEntries.count) filtered entries")
             return convertedEntries
         }
+    }
+
+    /// Maps semantic hints to keyword patterns for boosting search results
+    /// Returns SQL LIKE patterns that should be matched against definitions
+    /// Example: "请客" (invite to dinner) → ["%food and drink%", "%someone to%dinner%", "%treating%meal%"]
+    private func getSemanticKeywordsFromHint(_ hint: String, baseQuery: String) -> [String] {
+        let lowerHint = hint.lowercased()
+        let lowerQuery = baseQuery.lowercased()
+
+        // Map Chinese semantic hints to English definition patterns
+        let chineseToPatterns: [String: [String]] = [
+            "请客": ["%food and drink%", "%someone to%dinner%", "%someone to%meal%", "%treating%"],
+            "款待": ["%entertainment%", "%hospitality%", "%treating%"],
+            "宴请": ["%banquet%", "%feast%", "%someone to%dinner%"],
+        ]
+
+        // Map query-specific semantic hints
+        var patterns: [String] = []
+
+        // Check for Chinese hints first
+        for (chineseHint, hintPatterns) in chineseToPatterns {
+            if lowerHint.contains(chineseHint) {
+                patterns.append(contentsOf: hintPatterns)
+            }
+        }
+
+        // Extract English keywords from parentheses (e.g., "treat (food)" → ["food"])
+        // Pattern: (word1, word2, word3)
+        if let startParen = hint.firstIndex(of: "("),
+           let endParen = hint.firstIndex(of: ")"),
+           startParen < endParen {
+            let insideParens = String(hint[hint.index(after: startParen)..<endParen])
+            let keywords = insideParens.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+
+            // For each keyword, create patterns
+            for keyword in keywords where !keyword.isEmpty {
+                // Direct match: "(esp. food)" matches definitions with "food"
+                patterns.append("%\(keyword)%")
+                // Phrase match: "food" also matches "food and drink"
+                patterns.append("%\(keyword) and%")
+                patterns.append("%\(keyword) or%")
+            }
+        }
+
+        // Query-specific boosting patterns
+        // These are general semantic categories that should be boosted for certain queries
+        let querySpecificPatterns: [String: [String]] = [
+            "treat": ["%esp.%food%", "%someone to%", "%treating%"],
+            "wear": ["%from the shoulders%", "%lower-body%", "%footwear%"],
+            "eat": ["%consume%", "%meal%", "%food%"],
+            "drink": ["%beverage%", "%liquid%"],
+        ]
+
+        if let queryPatterns = querySpecificPatterns[lowerQuery] {
+            patterns.append(contentsOf: queryPatterns)
+        }
+
+        return Array(Set(patterns))  // Remove duplicates
     }
 
     /// Returns core/basic words for a given query that should be prioritized

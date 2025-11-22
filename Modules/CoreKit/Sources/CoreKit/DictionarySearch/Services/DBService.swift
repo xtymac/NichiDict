@@ -472,6 +472,20 @@ public struct DBService: DBServiceProtocol {
                             WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
                             ELSE 4
                         END AS match_priority,
+                        -- Phrasal penalty: For basic English words, penalize phrasal expressions
+                        -- e.g., "after all", "if only", "so that", "but also", "even if"
+                        CASE
+                            WHEN LOWER(ws.definition_english) LIKE '%after all%' AND ? = 'all' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%if only%' AND ? = 'if' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%even if%' AND ? = 'if' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%so that%' AND ? = 'so' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%but also%' AND ? = 'but' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%even so%' AND ? = 'so' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%and yet%' AND ? = 'yet' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%and still%' AND ? = 'still' THEN 1
+                            WHEN LOWER(ws.definition_english) LIKE '%even though%' AND ? = 'though' THEN 1
+                            ELSE 0
+                        END AS phrasal_penalty,
                         -- Parenthetical penalty: prioritize primary definitions over contextual usage
                         -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
                         -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
@@ -652,6 +666,7 @@ public struct DBService: DBServiceProtocol {
                     SELECT
                         c.id,
                         MIN(c.match_priority) AS match_priority,
+                        MIN(c.phrasal_penalty) AS phrasal_penalty,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
@@ -676,31 +691,19 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level IS NOT NULL THEN 0
                         ELSE 1
                     END,
-                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
-                    agg.semantic_priority,
-                    -- Priority 4: Parenthetical penalty
-                    -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
-                    -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
-                    --   - 試験 (sense #1: "examination; exam; test") vs
-                    --   - 問題 (sense #1: "question (e.g. on a test)")
-                    agg.parenthetical_priority,
-                    -- Priority 5: Conjunction priority (logical conjunctions before conversational transitions)
-                    -- For queries like "so", "but", "however", "therefore"
-                    -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
-                    -- CRITICAL: Must come BEFORE JLPT level to ensure semantic relevance > common usage level
-                    agg.conjunction_priority,
-                    -- Priority 6: Match quality (word position in definition)
-                    -- CRITICAL: Must come BEFORE JLPT level to prioritize semantic relevance
-                    -- e.g., for "so": それで (def starts with "so") before でも (def contains "even so" at end)
-                    -- This ensures primary meanings rank higher than secondary mentions
+                    -- Priority 3: Phrasal penalty (NEW - for basic English words)
+                    -- Demote phrasal expressions like "after all", "if only", "so that"
+                    -- This ensures core words with direct translations rank higher
+                    -- e.g., 全部 (all) before 更に (after all)
+                    agg.phrasal_penalty,
+                    -- Priority 4: Match quality (word position in definition)
+                    -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
+                    -- e.g., for "all": 全部 (def="all; entire") before 更に (def contains "after all")
                     agg.match_priority,
-                    -- Priority 7: First matching sense (sense_order: 1st sense > 2nd sense > ...)
-                    -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
-                    -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
-                    agg.first_matching_sense,
-                    -- Priority 8: JLPT level priority (N5 > N4 > N3 > N2 > N1)
-                    -- For reverse search, prioritize more basic/common JLPT levels
-                    -- e.g., 試験 (N4: exam/test) before 検査 (N3: inspection/test)
+                    -- Priority 5: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
+                    -- Prioritizes common vocabulary over grammatical conjunctions
+                    -- e.g., 全部 (N5: all) before 更に (N3: furthermore; after all)
                     CASE
                         WHEN e.jlpt_level = 'N5' THEN 0
                         WHEN e.jlpt_level = 'N4' THEN 1
@@ -709,6 +712,22 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level = 'N1' THEN 4
                         ELSE 5
                     END,
+                    -- Priority 6: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    agg.semantic_priority,
+                    -- Priority 7: Parenthetical penalty
+                    -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
+                    -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
+                    --   - 試験 (sense #1: "examination; exam; test") vs
+                    --   - 問題 (sense #1: "question (e.g. on a test)")
+                    agg.parenthetical_priority,
+                    -- Priority 8: Conjunction priority (logical conjunctions before conversational transitions)
+                    -- For queries like "so", "but", "however", "therefore"
+                    -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
+                    agg.conjunction_priority,
+                    -- Priority 9: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
+                    -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
+                    agg.first_matching_sense,
                     -- Priority 9: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
@@ -741,13 +760,23 @@ public struct DBService: DBServiceProtocol {
                 LIMIT ?
                 """
                 arguments = [
-                    lowerQuery, lowerQuery, lowerQuery,  // match_priority: lines 272-274
-                    lowerQuery, lowerQuery,              // match_priority: lines 275-276 (with NOT LIKE)
-                    lowerQuery,                          // match_priority: line 277
-                    lowerQuery, lowerQuery,              // match_priority: lines 278-279 (with NOT LIKE)
-                    lowerQuery,                          // match_priority: line 280
-                    lowerQuery, lowerQuery,              // match_priority: lines 281-282 (with NOT LIKE)
-                    lowerQuery,                          // match_priority: line 283
+                    lowerQuery, lowerQuery, lowerQuery,  // match_priority: lines 465-467
+                    lowerQuery, lowerQuery,              // match_priority: lines 468-470
+                    lowerQuery,                          // match_priority: line 471
+                    lowerQuery, lowerQuery,              // match_priority: lines 472-473
+                    lowerQuery,                          // match_priority: line 481
+                    lowerQuery, lowerQuery,              // match_priority: lines 482-483
+                    lowerQuery,                          // match_priority: line 484
+                    // phrasal_penalty (9 params - one for each phrasal check)
+                    lowerQuery,                    // line 482: 'after all' AND ? = 'all'
+                    lowerQuery,                    // line 483: 'if only' AND ? = 'if'
+                    lowerQuery,                    // line 484: 'even if' AND ? = 'if'
+                    lowerQuery,                    // line 485: 'so that' AND ? = 'so'
+                    lowerQuery,                    // line 486: 'but also' AND ? = 'but'
+                    lowerQuery,                    // line 487: 'even so' AND ? = 'so'
+                    lowerQuery,                    // line 488: 'and yet' AND ? = 'yet'
+                    lowerQuery,                    // line 489: 'and still' AND ? = 'still'
+                    lowerQuery,                    // line 490: 'even though' AND ? = 'though'
                     // parenthetical_priority (16 params: 4 for "as a/an" + 12 for parentheses)
                     lowerQuery,                    // line 404: LIKE '%as a ' || ? || '%'
                     lowerQuery,                    // line 405: LIKE '%as an ' || ? || '%'

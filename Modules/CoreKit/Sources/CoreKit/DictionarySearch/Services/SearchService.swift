@@ -12,7 +12,11 @@ public struct SearchService: SearchServiceProtocol {
     }
     
     public func search(query: String, maxResults: Int) async throws -> [SearchResult] {
+        let searchStartTime = CFAbsoluteTimeGetCurrent()
+        print("⏱️ [Search] Starting search for query: '\(query)'")
+
         // Step 1: Validate and sanitize input
+        let step1Start = CFAbsoluteTimeGetCurrent()
         let trimmedQuery = query.trimmingCharacters(in: .whitespaces)
         guard !trimmedQuery.isEmpty else {
             return []
@@ -31,14 +35,18 @@ public struct SearchService: SearchServiceProtocol {
 
         // Step 2: Detect script type
         let scriptType = ScriptDetector.detect(sanitizedQuery)
+        print("⏱️ [Search] Step 1: Validate & sanitize - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step1Start) * 1000))ms")
         print("🔍 SearchService: query='\(sanitizedQuery)' scriptType=\(scriptType)")
 
         // Detect if this looks like English/Chinese query BEFORE normalization
         // This is important because English words shouldn't go through romaji conversion
+        let step2Start = CFAbsoluteTimeGetCurrent()
         let useReverseSearch = shouldTryReverseSearch(query: sanitizedQuery, scriptType: scriptType)
         let isEnglishQuery = isLikelyEnglishQuery(query: sanitizedQuery, scriptType: scriptType)
+        print("⏱️ [Search] Step 2: Detect search type - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step2Start) * 1000))ms")
 
         // Step 3: Normalize query
+        let step3Start = CFAbsoluteTimeGetCurrent()
         let normalizedQuery: String
         switch scriptType {
         case .romaji:
@@ -54,6 +62,7 @@ public struct SearchService: SearchServiceProtocol {
             // データ → でーた
             normalizedQuery = sanitizedQuery.katakanaToHiragana()
         }
+        print("⏱️ [Search] Step 3: Normalize query - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step3Start) * 1000))ms")
 
         // Step 4: Execute database search
         let searchLimit = min(maxResults, 100)
@@ -69,6 +78,7 @@ public struct SearchService: SearchServiceProtocol {
             useReverseSearch: useReverseSearch
         )
 
+        let step4Start = CFAbsoluteTimeGetCurrent()
         if useReverseSearch {
             // For English/Chinese queries, ONLY use reverse search
             // This prevents incorrect matches from forward search
@@ -133,8 +143,10 @@ public struct SearchService: SearchServiceProtocol {
                 }
             }
         }
-        
+        print("⏱️ [Search] Step 4: Database query - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step4Start) * 1000))ms")
+
         // Step 5: Classify match types and create SearchResults
+        let step5Start = CFAbsoluteTimeGetCurrent()
         print("🔍 DEBUG SearchService: dbResults order before map:")
         for (index, entry) in dbResults.enumerated() {
             print("  \(index + 1). \(entry.headword)")
@@ -171,12 +183,14 @@ public struct SearchService: SearchServiceProtocol {
         for (index, result) in searchResults.enumerated() {
             print("  \(index + 1). \(result.entry.headword) (bucket: \(result.bucket), score: \(result.relevanceScore))")
         }
+        print("⏱️ [Search] Step 5: Classify & score results - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step5Start) * 1000))ms")
 
         // Step 6: Rank results
         // IMPORTANT: Both forward and reverse search now use SQL-based ordering
         // SQL ORDER BY provides comprehensive ranking:
         //   Forward: match_priority → JLPT existence → JLPT level → frequency → length
         //   Reverse: core native → main verb boost → JLPT existence → semantic → sense order → idiom → frequency → POS → parenthetical → katakana → match quality
+        let step6Start = CFAbsoluteTimeGetCurrent()
         let ranked: [SearchResult]
         ranked = searchResults
         if useReverseSearch {
@@ -184,6 +198,7 @@ public struct SearchService: SearchServiceProtocol {
         } else {
             print("🔍 DEBUG SearchService: Forward search - using SQL ordering (no client-side sort)")
         }
+        print("⏱️ [Search] Step 6: Rank results - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step6Start) * 1000))ms")
 
         // Old code (disabled): Client-side sorting that was overriding SQL's JLPT prioritization
         /*
@@ -220,11 +235,18 @@ public struct SearchService: SearchServiceProtocol {
         */
 
         // Step 7: Limit to maxResults
+        let step7Start = CFAbsoluteTimeGetCurrent()
         let finalResults = Array(ranked.prefix(maxResults))
+        print("⏱️ [Search] Step 7: Limit results - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step7Start) * 1000))ms")
+
         print("🔍 DEBUG SearchService: Final results order being returned:")
         for (index, result) in finalResults.enumerated() {
             print("  \(index + 1). \(result.entry.headword)")
         }
+
+        let totalSearchTime = (CFAbsoluteTimeGetCurrent() - searchStartTime) * 1000
+        print("⏱️ [Search] ✅ Search completed - Total: \(String(format: "%.3f", totalSearchTime))ms")
+
         return finalResults
     }
     

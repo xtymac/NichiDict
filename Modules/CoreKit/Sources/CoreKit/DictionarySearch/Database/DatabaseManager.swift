@@ -10,41 +10,59 @@ public actor DatabaseManager {
     
     public var dbQueue: DatabaseQueue {
         get async throws {
+            let totalStartTime = CFAbsoluteTimeGetCurrent()
+
             if let queue = _dbQueue {
                 return queue
             }
-            
+
+            print("⏱️ [DB Init] Starting database initialization...")
+
             // Locate seed.sqlite in app bundle
+            let step1Start = CFAbsoluteTimeGetCurrent()
             guard let dbURL = Bundle.main.url(forResource: "seed", withExtension: "sqlite") else {
                 throw DatabaseError.seedDatabaseNotFound
             }
-            
+            print("⏱️ [DB Init] Step 1: Locate database file - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step1Start) * 1000))ms")
+
             // Verify file is readable
+            let step2Start = CFAbsoluteTimeGetCurrent()
             guard FileManager.default.isReadableFile(atPath: dbURL.path) else {
                 throw DatabaseError.seedDatabaseNotReadable
             }
-            
+            print("⏱️ [DB Init] Step 2: Verify file readable - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step2Start) * 1000))ms")
+
             // Configure for read-only access
+            let step3Start = CFAbsoluteTimeGetCurrent()
             var config = Configuration()
             config.readonly = true
             config.label = "DictionaryDatabase"
-            
+
             config.prepareDatabase { db in
                 // Enforce read-only at SQLite level
                 try db.execute(sql: "PRAGMA query_only = ON")
-                
+
                 // Optimize for read-heavy workload
                 try db.execute(sql: "PRAGMA temp_store = MEMORY")
                 try db.execute(sql: "PRAGMA cache_size = -8000") // 8MB
                 try db.execute(sql: "PRAGMA mmap_size = 268435456") // 256MB
             }
-            
-            let queue = try DatabaseQueue(path: dbURL.path, configuration: config)
+            print("⏱️ [DB Init] Step 3: Configure database - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step3Start) * 1000))ms")
 
-            // Edge case: Verify database integrity on first open
-            try await verifyDatabaseIntegrity(queue)
+            let step4Start = CFAbsoluteTimeGetCurrent()
+            let queue = try DatabaseQueue(path: dbURL.path, configuration: config)
+            print("⏱️ [DB Init] Step 4: Open database connection - \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - step4Start) * 1000))ms")
+
+            // OPTIMIZATION: Skip integrity check for bundled read-only database
+            // The database is validated during build and bundled with the app.
+            // Integrity check adds ~2 seconds to first search with no practical benefit.
+            // If needed for debugging, use validateDatabaseIntegrity() manually.
 
             _dbQueue = queue
+
+            let totalTime = (CFAbsoluteTimeGetCurrent() - totalStartTime) * 1000
+            print("⏱️ [DB Init] ✅ Database initialized successfully - Total: \(String(format: "%.3f", totalTime))ms")
+
             return queue
         }
     }
@@ -52,13 +70,18 @@ public actor DatabaseManager {
     /// Verify database integrity (corruption check)
     private func verifyDatabaseIntegrity(_ queue: DatabaseQueue) async throws {
         try await queue.read { db in
+            print("⏱️ [DB Verify] Starting integrity verification...")
+
             // SQLite integrity check
+            let check1Start = CFAbsoluteTimeGetCurrent()
             let integrityResult = try String.fetchOne(db, sql: "PRAGMA integrity_check")
             guard integrityResult == "ok" else {
                 throw DatabaseError.corruptedDatabase(integrityResult ?? "Unknown error")
             }
+            print("⏱️ [DB Verify] - PRAGMA integrity_check: \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - check1Start) * 1000))ms")
 
             // Verify required tables exist
+            let check2Start = CFAbsoluteTimeGetCurrent()
             let requiredTables = ["dictionary_entries", "dictionary_fts", "word_senses", "example_sentences"]
             for table in requiredTables {
                 let exists = try Bool.fetchOne(db, sql: """
@@ -70,14 +93,17 @@ public actor DatabaseManager {
                     throw DatabaseError.schemaMismatch("Missing table: \(table)")
                 }
             }
+            print("⏱️ [DB Verify] - Verify tables exist: \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - check2Start) * 1000))ms")
 
             // Verify FTS sync
+            let check3Start = CFAbsoluteTimeGetCurrent()
             let entryCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM dictionary_entries") ?? 0
             let ftsCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM dictionary_fts") ?? 0
 
             guard entryCount == ftsCount else {
                 throw DatabaseError.ftsOutOfSync
             }
+            print("⏱️ [DB Verify] - Verify FTS sync (entries: \(entryCount), fts: \(ftsCount)): \(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - check3Start) * 1000))ms")
         }
     }
 

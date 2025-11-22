@@ -362,10 +362,14 @@ public struct DBService: DBServiceProtocol {
                 }
             }
 
+            // Merge duplicate entries (same headword + reading)
+            // Example: この頃 appears twice with different meanings → merge into one entry with multiple senses
+            let mergedEntries = self.mergeEntriesByHeadwordReading(entries)
+
             // Final sorting: demote rare kanji variants (uk = usually kana)
             // Priority order: pure kana form > common kanji > rare kanji
             // Example: やっと > [other compounds] > 漸と (rare kanji)
-            let finalEntries = entries.sorted { entry1, entry2 in
+            let finalEntries = mergedEntries.sorted { entry1, entry2 in
                 let isRare1 = entry1.isRareKanji
                 let isRare2 = entry2.isRareKanji
 
@@ -1561,13 +1565,148 @@ public struct DBService: DBServiceProtocol {
                     SELECT COUNT(*) > 0 FROM sqlite_master
                     WHERE type='table' AND name=?
                     """, arguments: [table])
-                
+
                 guard exists == true else {
                     throw DatabaseError.schemaMismatch("Missing table: \(table)")
                 }
             }
-            
+
             return true
+        }
+    }
+
+    // MARK: - Helper Functions
+
+    /// Merge entries with the same headword into a single entry with multiple senses
+    /// Example: この頃(このごろ) + この頃(このころ) → merge into one entry with numbered senses
+    /// Note: We merge by headword only, not reading, to handle pronunciation variants (ごろ/ころ)
+    private func mergeEntriesByHeadwordReading(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {
+        // Group entries by headword only (ignore reading differences like ごろ vs ころ)
+        var groups: [String: [DictionaryEntry]] = [:]
+        for entry in entries {
+            let key = entry.headword
+            groups[key, default: []].append(entry)
+        }
+
+        // Process each group
+        var mergedEntries: [DictionaryEntry] = []
+        var processedKeys: Set<String> = []
+
+        for entry in entries {
+            let key = entry.headword
+
+            // Skip if we've already processed this group
+            guard !processedKeys.contains(key) else {
+                continue
+            }
+            processedKeys.insert(key)
+
+            guard let group = groups[key] else {
+                continue
+            }
+
+            // If only one entry in group, no merging needed
+            if group.count == 1 {
+                mergedEntries.append(entry)
+                continue
+            }
+
+            print("🔗 DBService: Merging \(group.count) entries for '\(entry.headword)' (\(entry.readingHiragana))")
+
+            // Pick the "best" entry as the base (prefer JLPT level, then frequency rank)
+            let bestEntry = group.sorted { e1, e2 in
+                // Prefer entry with JLPT level
+                if e1.jlptLevel != nil && e2.jlptLevel == nil {
+                    return true
+                }
+                if e1.jlptLevel == nil && e2.jlptLevel != nil {
+                    return false
+                }
+
+                // If both have JLPT levels, prefer higher level (N5 > N4 > N3 > N2 > N1)
+                if let jlpt1 = e1.jlptLevel, let jlpt2 = e2.jlptLevel {
+                    let priority1 = jlptPriority(jlpt1)
+                    let priority2 = jlptPriority(jlpt2)
+                    if priority1 != priority2 {
+                        return priority1 < priority2
+                    }
+                }
+
+                // Prefer entry with better frequency rank (lower is better)
+                if let freq1 = e1.frequencyRank, let freq2 = e2.frequencyRank {
+                    return freq1 < freq2
+                }
+                if e1.frequencyRank != nil && e2.frequencyRank == nil {
+                    return true
+                }
+                if e1.frequencyRank == nil && e2.frequencyRank != nil {
+                    return false
+                }
+
+                // Default: keep original order
+                return false
+            }.first!
+
+            // Collect all unique readings (for variants like ごろ/ころ)
+            let allReadingsHiragana = Set(group.map { $0.readingHiragana })
+            let allReadingsRomaji = Set(group.map { $0.readingRomaji })
+
+            // Combine readings with · separator (e.g., "このごろ·このころ")
+            let combinedReadingHiragana = allReadingsHiragana.sorted().joined(separator: "·")
+            let combinedReadingRomaji = allReadingsRomaji.sorted().joined(separator: "·")
+
+            // Collect all senses from all entries in the group
+            var allSenses: [WordSense] = []
+            for groupEntry in group {
+                allSenses.append(contentsOf: groupEntry.senses)
+            }
+
+            // Renumber senses sequentially (1, 2, 3, ...)
+            var renumberedSenses: [WordSense] = []
+            for (index, sense) in allSenses.enumerated() {
+                let newSense = WordSense(
+                    id: sense.id,
+                    entryId: sense.entryId,
+                    definitionEnglish: sense.definitionEnglish,
+                    definitionChineseSimplified: sense.definitionChineseSimplified,
+                    definitionChineseTraditional: sense.definitionChineseTraditional,
+                    partOfSpeech: sense.partOfSpeech,
+                    usageNotes: sense.usageNotes,
+                    senseOrder: index + 1,  // Renumber starting from 1
+                    examples: sense.examples
+                )
+                renumberedSenses.append(newSense)
+            }
+
+            // Create merged entry with combined readings
+            let mergedEntry = DictionaryEntry(
+                id: bestEntry.id,
+                headword: bestEntry.headword,
+                readingHiragana: combinedReadingHiragana,  // Combined readings
+                readingRomaji: combinedReadingRomaji,      // Combined romaji
+                frequencyRank: bestEntry.frequencyRank,
+                pitchAccent: bestEntry.pitchAccent,
+                jlptLevel: bestEntry.jlptLevel,
+                createdAt: bestEntry.createdAt,
+                senses: renumberedSenses
+            )
+
+            mergedEntries.append(mergedEntry)
+            print("🔗 DBService: Merged '\(mergedEntry.headword)' → \(renumberedSenses.count) senses")
+        }
+
+        return mergedEntries
+    }
+
+    /// Get JLPT priority for sorting (lower is better: N5=0, N4=1, N3=2, N2=3, N1=4)
+    private func jlptPriority(_ level: String) -> Int {
+        switch level {
+        case "N5": return 0
+        case "N4": return 1
+        case "N3": return 2
+        case "N2": return 3
+        case "N1": return 4
+        default: return 5
         }
     }
 }

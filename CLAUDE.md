@@ -60,4 +60,25 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - Ranking priority: match_priority → compound_priority → JLPT level → katakana penalty → **rare kanji penalty** → frequency_rank → length
 - Ensures learners see common vocabulary before specialized literary/classical terms
 - Targeted at academic compounds that appear in dictionaries but not in everyday usage
+
+## Kana/Kanji Display Rules (2025-11-22)
+
+**Display logic for search results**: Determines when to show kana vs kanji headwords in search results.
+
+**Rules**:
+1. ✅ **Adverbs** (副詞) may display kana when:
+   - Pure adverbs with rare kanji variants (e.g., 屹度 → きっと, 頗る → すこぶる, 殊更 → ことさら)
+   - Multiple kanji variants exist (e.g., きっと: 屹度, 急度, きっと)
+   - Examples: ぜんぜん、すごく、やっぱり are commonly written in kana
+
+2. ❌ **Nouns** (名詞) NEVER show kana automatically:
+   - Nouns with multiple kanji variants always show kanji (e.g., 事務所, not じむしょ)
+   - Exception: Words habitually written in kana in modern usage (e.g., こと、もの)
+   - Ensures learners recognize standard kanji forms for nouns
+
+**Implementation** ([SearchView.swift:127-131](NichiDict/NichiDict/Views/SearchView.swift#L127-L131), [SearchView.swift:147-150](NichiDict/NichiDict/Views/SearchView.swift#L147-L150)):
+- `isRareKanjiWriting`: Only applies to pure adverbs (not nouns or mixed POS)
+- Multiple kanji variants check: Only shows kana for pure adverbs
+- Priority: hasKanaVariant → isRareKanjiWriting → multiple variants (adverbs only)
+- Removed low frequency condition that was incorrectly showing kana for nouns
 <!-- MANUAL ADDITIONS END -->

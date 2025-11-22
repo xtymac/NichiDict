@@ -486,6 +486,14 @@ public struct DBService: DBServiceProtocol {
                             WHEN LOWER(ws.definition_english) LIKE '%even though%' AND ? = 'though' THEN 1
                             ELSE 0
                         END AS phrasal_penalty,
+                        -- Archaic penalty: Demote obsolete/archaic meanings
+                        -- e.g., おたく = "your husband" (archaic), 其れで instead of それで
+                        CASE
+                            WHEN ws.usage_notes LIKE '%archaic%' THEN 1
+                            WHEN ws.usage_notes LIKE '%obsolete%' THEN 1
+                            WHEN ws.usage_notes LIKE '%rarely used%' THEN 1
+                            ELSE 0
+                        END AS archaic_penalty,
                         -- Parenthetical penalty: prioritize primary definitions over contextual usage
                         -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
                         -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
@@ -667,6 +675,7 @@ public struct DBService: DBServiceProtocol {
                         c.id,
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.phrasal_penalty) AS phrasal_penalty,
+                        MIN(c.archaic_penalty) AS archaic_penalty,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
@@ -696,11 +705,15 @@ public struct DBService: DBServiceProtocol {
                     -- This ensures core words with direct translations rank higher
                     -- e.g., 全部 (all) before 更に (after all)
                     agg.phrasal_penalty,
-                    -- Priority 4: Match quality (word position in definition)
+                    -- Priority 4: Archaic penalty (NEW - demote obsolete/archaic meanings)
+                    -- Demote archaic or rarely-used meanings to prioritize modern usage
+                    -- e.g., ご主人 (your husband) before おたく (your husband - archaic)
+                    agg.archaic_penalty,
+                    -- Priority 5: Match quality (word position in definition)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- e.g., for "all": 全部 (def="all; entire") before 更に (def contains "after all")
                     agg.match_priority,
-                    -- Priority 5: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- Priority 6: JLPT level priority (N5 > N4 > N3 > N2 > N1)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- Prioritizes common vocabulary over grammatical conjunctions
                     -- e.g., 全部 (N5: all) before 更に (N3: furthermore; after all)
@@ -712,23 +725,23 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level = 'N1' THEN 4
                         ELSE 5
                     END,
-                    -- Priority 6: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 7: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 7: Parenthetical penalty
+                    -- Priority 8: Parenthetical penalty
                     -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
                     -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
                     --   - 試験 (sense #1: "examination; exam; test") vs
                     --   - 問題 (sense #1: "question (e.g. on a test)")
                     agg.parenthetical_priority,
-                    -- Priority 8: Conjunction priority (logical conjunctions before conversational transitions)
+                    -- Priority 9: Conjunction priority (logical conjunctions before conversational transitions)
                     -- For queries like "so", "but", "however", "therefore"
                     -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
                     agg.conjunction_priority,
-                    -- Priority 9: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 10: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
                     -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
                     agg.first_matching_sense,
-                    -- Priority 9: Main verb boost (基础动词优先)
+                    -- Priority 11: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
                     -- Note: Using N5 only since frequency data is not yet populated (all entries have freq=201)
@@ -738,14 +751,14 @@ public struct DBService: DBServiceProtocol {
                         THEN 0
                         ELSE 1
                     END,
-                    -- Priority 10: Idiom penalty (direct translation > compound words > idioms)
+                    -- Priority 12: Idiom penalty (direct translation > compound words > idioms)
                     -- e.g., 百 before 百点 before 九分九厘
                     agg.idiom_priority,
-                    -- Priority 11: Frequency (common words first, generalizable across all queries)
+                    -- Priority 13: Frequency (common words first, generalizable across all queries)
                     COALESCE(e.frequency_rank, 999999),
-                    -- Priority 12: Part-of-speech (verbs > nouns > other)
+                    -- Priority 14: Part-of-speech (verbs > nouns > other)
                     agg.pos_weight,
-                    -- Priority 13: DEMOTE pure katakana (reverse of old logic)
+                    -- Priority 15: DEMOTE pure katakana (reverse of old logic)
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -873,6 +886,14 @@ public struct DBService: DBServiceProtocol {
                             WHEN LOWER(ws.definition_english) LIKE '%; ' || ? || '; %' THEN 3
                             ELSE 4
                         END AS match_priority,
+                        -- Archaic penalty: Demote obsolete/archaic meanings
+                        -- e.g., おたく = "your husband" (archaic), 其れで instead of それで
+                        CASE
+                            WHEN ws.usage_notes LIKE '%archaic%' THEN 1
+                            WHEN ws.usage_notes LIKE '%obsolete%' THEN 1
+                            WHEN ws.usage_notes LIKE '%rarely used%' THEN 1
+                            ELSE 0
+                        END AS archaic_penalty,
                         -- Parenthetical penalty: prioritize primary definitions over contextual usage
                         -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
                         -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
@@ -945,6 +966,7 @@ public struct DBService: DBServiceProtocol {
                     SELECT
                         c.id,
                         MIN(c.match_priority) AS match_priority,
+                        MIN(c.archaic_penalty) AS archaic_penalty,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
@@ -962,22 +984,24 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 2: Archaic penalty (demote obsolete/archaic meanings)
+                    agg.archaic_penalty,
+                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 3: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 4: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     agg.first_matching_sense,
-                    -- Priority 4: Conjunction priority (conjunctions first for linking words)
+                    -- Priority 5: Conjunction priority (conjunctions first for linking words)
                     agg.conjunction_priority,
-                    -- Priority 5: Part-of-speech
+                    -- Priority 6: Part-of-speech
                     agg.pos_weight,
-                    -- Priority 6: Parenthetical semantic match
+                    -- Priority 7: Parenthetical semantic match
                     agg.parenthetical_priority,
-                    -- Priority 7: Common words
+                    -- Priority 8: Common words
                     CASE
                         WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
                         ELSE 1
                     END,
-                    -- Priority 8: DEMOTE pure katakana
+                    -- Priority 9: DEMOTE pure katakana
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -986,9 +1010,9 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 9: Match quality
+                    -- Priority 10: Match quality
                     agg.match_priority,
-                    -- Priority 10: Frequency
+                    -- Priority 11: Frequency
                     COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,

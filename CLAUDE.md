@@ -34,4 +34,22 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - Added `phrasal_penalty` field to detect phrases like "after all", "if only", "so that"
 - Adjusted search priority: phrasal_penalty → match_priority → JLPT level → conjunction_priority
 - Ensures learners see common, direct translations before specialized idiomatic usages
+
+## Sense Prioritization for Onomatopoeia (2025-11)
+
+**Problem**: JMDict often lists onomatopoeia senses first, but these are less common in daily usage.
+
+**Example**: どんどん (dondond)
+- ❌ Original order: "drumming (noise); beating" → "rapidly; steadily"
+- ✅ New order: "rapidly; steadily" → "drumming (noise); beating"
+
+**Implementation** ([DBService.swift](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L1490-L1530)):
+- Added `sortSensesByPriority()` helper function
+- Added `isOnomatopoeiaSense()` detector (checks for adverb-to + sound keywords)
+- Applied to both forward search (`searchEntries`) and reverse search (`searchReverse`)
+- Prioritizes common meanings (rapidly, steadily) over sound effects (drumming, pounding)
+
+**Detection logic**:
+- Onomatopoeia = `adverb taking the 'to' particle` + sound keywords (noise, drumming, pounding, etc.)
+- Non-onomatopoeia adverb-to words (like やっと "finally") are NOT deprioritized
 <!-- MANUAL ADDITIONS END -->

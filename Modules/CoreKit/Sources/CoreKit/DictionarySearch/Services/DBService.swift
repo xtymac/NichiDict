@@ -303,7 +303,10 @@ public struct DBService: DBServiceProtocol {
                     .filter(Column("entry_id") == entries[i].id)
                     .order(Column("sense_order"))
                     .fetchAll(db)
-                entries[i].senses = senses
+
+                // Smart sense ordering: prioritize common meanings over onomatopoeia
+                // For words like どんどん, show "rapidly; steadily" before "drumming noise"
+                entries[i].senses = sortSensesByPriority(senses)
             }
 
             // Special handling for words that are usually written in kana but have rare kanji forms
@@ -1103,7 +1106,8 @@ public struct DBService: DBServiceProtocol {
                 // They are included regardless of whether their definition matches the query
                 let isCoreWord = coreHeadwordsArray.contains(entry.headword)
                 if isCoreWord {
-                    entry.senses = allSenses
+                    // Apply smart sense ordering: prioritize common meanings over onomatopoeia
+                    entry.senses = sortSensesByPriority(allSenses)
                     filteredEntries.append(entry)
                     print("    ✓ Added to filteredEntries (CORE WORD - bypassed filtering, now has \(filteredEntries.count) entries)")
                     continue
@@ -1206,7 +1210,8 @@ public struct DBService: DBServiceProtocol {
 
                 // Only include entry if it has at least one relevant sense
                 if !relevantSenses.isEmpty {
-                    entry.senses = relevantSenses
+                    // Apply smart sense ordering: prioritize common meanings over onomatopoeia
+                    entry.senses = sortSensesByPriority(relevantSenses)
                     filteredEntries.append(entry)
                     print("    ✓ Added to filteredEntries (now has \(filteredEntries.count) entries)")
                 } else {
@@ -1459,13 +1464,55 @@ public struct DBService: DBServiceProtocol {
                     SELECT COUNT(*) > 0 FROM sqlite_master
                     WHERE type='table' AND name=?
                     """, arguments: [table])
-                
+
                 guard exists == true else {
                     throw DatabaseError.schemaMismatch("Missing table: \(table)")
                 }
             }
-            
+
             return true
         }
+    }
+
+    /// Helper: Sort senses by priority - prioritize common meanings over onomatopoeia
+    /// Example: どんどん - "rapidly; steadily" appears before "drumming noise"
+    private func sortSensesByPriority(_ senses: [WordSense]) -> [WordSense] {
+        return senses.sorted { sense1, sense2 in
+            let isOnomatopoeia1 = isOnomatopoeiaSense(sense1)
+            let isOnomatopoeia2 = isOnomatopoeiaSense(sense2)
+
+            // Prioritize non-onomatopoeia senses
+            if isOnomatopoeia1 != isOnomatopoeia2 {
+                return !isOnomatopoeia1  // Non-onomatopoeia comes first
+            }
+
+            // Otherwise preserve original sense_order
+            return sense1.senseOrder < sense2.senseOrder
+        }
+    }
+
+    /// Helper: Detect if a sense is onomatopoeia (sound/noise words)
+    /// Onomatopoeia senses should be deprioritized in favor of common meanings
+    /// Example: どんどん - prioritize "rapidly; steadily" over "drumming noise"
+    private func isOnomatopoeiaSense(_ sense: WordSense) -> Bool {
+        let pos = sense.partOfSpeech.lowercased()
+        let def = sense.definitionEnglish.lowercased()
+
+        // Check 1: Part of speech indicates onomatopoeia
+        // Adverbs with 'to' particle (副詞と) are often onomatopoeia
+        // But NOT all adverbs-to are onomatopoeia (e.g., やっと is common usage)
+        let isAdvTo = pos.contains("adverb taking the 'to' particle") || pos.contains("adverb to")
+
+        // Check 2: Definition contains sound/noise keywords
+        let soundKeywords = [
+            "noise", "sound", "drumming", "pounding", "banging", "booming",
+            "stamping", "clatter", "rattle", "rustle", "buzz", "hum",
+            "thud", "thump", "splash", "crack", "snap", "pop"
+        ]
+        let containsSoundKeyword = soundKeywords.contains { def.contains($0) }
+
+        // It's onomatopoeia if it's adverb-to AND contains sound keywords
+        // This filters out adverb-to words like やっと (finally) which don't have sound keywords
+        return isAdvTo && containsSoundKeyword
     }
 }

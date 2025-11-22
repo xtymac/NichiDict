@@ -306,19 +306,27 @@ public struct DBService: DBServiceProtocol {
                 entries[i].senses = senses
             }
 
-            // Final sorting: exact matches first, then variant priority for same-reading entries
-            // 1. Exact headword match comes first (e.g., 為る before 病気に為る)
-            // 2. For entries with same reading, sort by displayPriority (uk > primary > rK)
-            // 3. Otherwise preserve SQL order (which handles match_priority, JLPT, frequency)
-            let finalEntries = entries.sorted { entry1, entry2 in
-                // Rule 1: Exact headword match comes first
+            // Final sorting: JLPT words prioritized, then exact matches, then variant priority
+            // 1. JLPT words before non-JLPT entries (demote foreign loanwords like circuit, kit)
+            // 2. Exact headword/reading match comes first among same-JLPT tier
+            // 3. For entries with same reading, sort by displayPriority (uk > primary > rK)
+            // 4. Otherwise preserve SQL order (which handles match_priority, frequency)
+            let sortedEntries = entries.sorted { entry1, entry2 in
+                // Rule 1: JLPT words before non-JLPT (top priority)
+                let hasJlpt1 = entry1.jlptLevel != nil
+                let hasJlpt2 = entry2.jlptLevel != nil
+                if hasJlpt1 != hasJlpt2 {
+                    return hasJlpt1  // JLPT words come first
+                }
+
+                // Rule 2: Exact headword match comes first (within same JLPT tier)
                 let isExact1 = entry1.headword == query || entry1.readingHiragana == query
                 let isExact2 = entry2.headword == query || entry2.readingHiragana == query
                 if isExact1 != isExact2 {
                     return isExact1  // Exact match comes first
                 }
 
-                // Rule 2: For same-reading entries (variants), sort by displayPriority
+                // Rule 3: For same-reading entries (variants), sort by displayPriority
                 // This ensures やっと (uk) > 漸と (rK) when both have reading やっと
                 if entry1.readingHiragana == entry2.readingHiragana {
                     let priority1 = entry1.displayPriority
@@ -328,8 +336,26 @@ public struct DBService: DBServiceProtocol {
                     }
                 }
 
-                // Rule 3: Preserve SQL order (stable sort)
+                // Rule 4: Preserve SQL order (stable sort)
                 return false
+            }
+
+            // Limit compound word results to reduce foreign loanword clutter
+            // Exact matches (headword or reading = query) are always shown
+            // Compound words (contains query but not exact match) are limited to 5
+            let exactMatches = sortedEntries.filter { entry in
+                entry.headword == query || entry.readingHiragana == query
+            }
+            let compoundMatches = sortedEntries.filter { entry in
+                entry.headword != query && entry.readingHiragana != query
+            }
+
+            let finalEntries: [DictionaryEntry]
+            if !exactMatches.isEmpty && compoundMatches.count > 5 {
+                // Show all exact matches + max 5 compound words
+                finalEntries = exactMatches + Array(compoundMatches.prefix(5))
+            } else {
+                finalEntries = sortedEntries
             }
 
             return finalEntries

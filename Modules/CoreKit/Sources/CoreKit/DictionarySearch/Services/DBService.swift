@@ -816,7 +816,12 @@ public struct DBService: DBServiceProtocol {
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- e.g., for "all": 全部 (def="all; entire") before 更に (def contains "after all")
                     agg.match_priority,
-                    -- Priority 7: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- Priority 7: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- CRITICAL: Moved BEFORE JLPT level to prioritize primary meanings
+                    -- e.g., 構想 (sense #1: "plan") before 寸法 (sense #2: "plan")
+                    -- Ensures words where query is the main meaning rank higher than secondary meanings
+                    agg.first_matching_sense,
+                    -- Priority 8: JLPT level priority (N5 > N4 > N3 > N2 > N1)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- Prioritizes common vocabulary over grammatical conjunctions
                     -- e.g., 全部 (N5: all) before 更に (N3: furthermore; after all)
@@ -828,22 +833,18 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level = 'N1' THEN 4
                         ELSE 5
                     END,
-                    -- Priority 8: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 9: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 9: Parenthetical penalty
+                    -- Priority 10: Parenthetical penalty
                     -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
-                    -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
+                    -- CRITICAL: Must come BEFORE conjunction_priority to distinguish:
                     --   - 試験 (sense #1: "examination; exam; test") vs
                     --   - 問題 (sense #1: "question (e.g. on a test)")
                     agg.parenthetical_priority,
-                    -- Priority 10: Conjunction priority (logical conjunctions before conversational transitions)
+                    -- Priority 11: Conjunction priority (logical conjunctions before conversational transitions)
                     -- For queries like "so", "but", "however", "therefore"
                     -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
                     agg.conjunction_priority,
-                    -- Priority 11: First matching sense (sense_order: 1st sense > 2nd sense > ...)
-                    -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
-                    -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
-                    agg.first_matching_sense,
                     -- Priority 12: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)

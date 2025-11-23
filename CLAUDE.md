@@ -23,6 +23,7 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - 2025-11: Added phrasal penalty system for English reverse search (prioritize JLPT core vocab)
 - 2025-11-22: Added rare kanji penalty for Japanese search (downrank academic/literary compounds)
 - 2025-11-23: Added verb phrase penalty for English reverse search (prioritize noun definitions for noun-like queries)
+- 2025-11-23: Moved sense_order priority before JLPT level for English reverse search (prioritize primary meanings)
 
 <!-- MANUAL ADDITIONS START -->
 ## English Reverse Search (2025-11)
@@ -64,6 +65,19 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - Only penalizes when isNounQuery=1, so "to test" queries still work correctly (押す won't be penalized for "to fall behind")
 - Uses LTRIM() to handle leading spaces in definitions before checking 'to %' pattern
 - Ensures learners searching for nouns see noun results first, not verb phrases containing the noun
+
+**Primary meaning priority system** (2025-11-23): For English reverse search, prioritize entries where the query is the primary (first) meaning:
+- Search "plan" → 構想 (sense 1: "plan; plot; idea") ranks before 寸法 (sense 2: "plan; intention", primary: "dimensions; measurements")
+- Ensures entries with the query as main meaning rank higher than entries with it as secondary meaning
+- Prevents words with misleading secondary definitions from ranking too high
+
+**Implementation** ([DBService.swift:819](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L819)):
+- Moved `first_matching_sense` (sense_order) to Priority 7, BEFORE JLPT level (Priority 8)
+- Previous ordering: JLPT level → sense_order caused N2 words with secondary meanings to beat N1 words with primary meanings
+- New ordering prioritizes primary meanings regardless of JLPT level:
+  - 構想 (N1, sense 1 for "plan") now ranks before 寸法 (N2, sense 2 for "plan")
+- **CRITICAL**: sense_order must come BEFORE JLPT level to ensure semantic relevance over commonality
+- Priority order: match_priority → **first_matching_sense** → JLPT level → semantic_category → parenthetical_priority → conjunction_priority
 
 ## Japanese Search Ranking (2025-11-22)
 

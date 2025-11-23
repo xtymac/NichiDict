@@ -114,6 +114,23 @@ public struct DBService: DBServiceProtocol {
             JOIN dictionary_fts fts ON e.id = fts.rowid
             WHERE dictionary_fts MATCH ?
             ORDER BY
+                -- Rare kanji penalty: Archaic words always rank last, regardless of match type
+                -- This ensures modern compound words (予定外, 予定納税) rank before archaic words (輿丁)
+                CASE
+                    WHEN INSTR(e.headword, '韜') > 0 OR INSTR(e.headword, '晦') > 0
+                         OR INSTR(e.headword, '躊') > 0 OR INSTR(e.headword, '躇') > 0
+                         OR INSTR(e.headword, '憚') > 0 OR INSTR(e.headword, '瞠') > 0
+                         OR INSTR(e.headword, '嘯') > 0 OR INSTR(e.headword, '囁') > 0
+                         OR INSTR(e.headword, '竦') > 0 OR INSTR(e.headword, '戮') > 0
+                         OR INSTR(e.headword, '慄') > 0 OR INSTR(e.headword, '謗') > 0
+                         OR INSTR(e.headword, '詭') > 0 OR INSTR(e.headword, '諌') > 0
+                         OR INSTR(e.headword, '蘊') > 0 OR INSTR(e.headword, '揶') > 0
+                         OR INSTR(e.headword, '揄') > 0 OR INSTR(e.headword, '逡') > 0
+                         OR INSTR(e.headword, '巡') > 0 AND INSTR(e.headword, '逡巡') > 0
+                         OR INSTR(e.headword, '輿') > 0  -- 輿 (palanquin/carriage) - archaic/historical
+                    THEN 1
+                    ELSE 0
+                END ASC,
                 match_priority ASC,
                 -- Compound word priority: true grammatical compounds > short compounds > unrelated homophones
                 compound_priority ASC,
@@ -136,24 +153,6 @@ public struct DBService: DBServiceProtocol {
                 -- e.g., for "する", penalize "するーぷ" but not "すると"
                 CASE
                     WHEN e.headword GLOB ? || '[ァ-ヴー]*' THEN 1
-                    ELSE 0
-                END ASC,
-                -- Rare kanji penalty: Demote academic/literary compounds with uncommon kanji
-                -- These kanji are outside 常用漢字 and appear mainly in classical/academic contexts
-                -- Examples: 韜晦 (concealing), 躊躇 (hesitation), 揶揄 (ridicule), etc.
-                -- About 90% of native speakers don't recognize these characters
-                CASE
-                    WHEN INSTR(e.headword, '韜') > 0 OR INSTR(e.headword, '晦') > 0
-                         OR INSTR(e.headword, '躊') > 0 OR INSTR(e.headword, '躇') > 0
-                         OR INSTR(e.headword, '憚') > 0 OR INSTR(e.headword, '瞠') > 0
-                         OR INSTR(e.headword, '嘯') > 0 OR INSTR(e.headword, '囁') > 0
-                         OR INSTR(e.headword, '竦') > 0 OR INSTR(e.headword, '戮') > 0
-                         OR INSTR(e.headword, '慄') > 0 OR INSTR(e.headword, '謗') > 0
-                         OR INSTR(e.headword, '詭') > 0 OR INSTR(e.headword, '諌') > 0
-                         OR INSTR(e.headword, '蘊') > 0 OR INSTR(e.headword, '揶') > 0
-                         OR INSTR(e.headword, '揄') > 0 OR INSTR(e.headword, '逡') > 0
-                         OR INSTR(e.headword, '巡') > 0 AND INSTR(e.headword, '逡巡') > 0
-                    THEN 1
                     ELSE 0
                 END ASC,
                 COALESCE(e.frequency_rank, 999999) ASC,
@@ -193,6 +192,22 @@ public struct DBService: DBServiceProtocol {
                 FROM dictionary_entries e
                 WHERE e.reading_hiragana = ?
                 ORDER BY
+                    -- Rare kanji penalty first (same as main search)
+                    CASE
+                        WHEN INSTR(e.headword, '韜') > 0 OR INSTR(e.headword, '晦') > 0
+                             OR INSTR(e.headword, '躊') > 0 OR INSTR(e.headword, '躇') > 0
+                             OR INSTR(e.headword, '憚') > 0 OR INSTR(e.headword, '瞠') > 0
+                             OR INSTR(e.headword, '嘯') > 0 OR INSTR(e.headword, '囁') > 0
+                             OR INSTR(e.headword, '竦') > 0 OR INSTR(e.headword, '戮') > 0
+                             OR INSTR(e.headword, '慄') > 0 OR INSTR(e.headword, '謗') > 0
+                             OR INSTR(e.headword, '詭') > 0 OR INSTR(e.headword, '諌') > 0
+                             OR INSTR(e.headword, '蘊') > 0 OR INSTR(e.headword, '揶') > 0
+                             OR INSTR(e.headword, '揄') > 0 OR INSTR(e.headword, '逡') > 0
+                             OR INSTR(e.headword, '巡') > 0 AND INSTR(e.headword, '逡巡') > 0
+                             OR INSTR(e.headword, '輿') > 0
+                        THEN 1
+                        ELSE 0
+                    END ASC,
                     variant_priority ASC,
                     CASE WHEN e.jlpt_level IS NOT NULL THEN 0 ELSE 1 END ASC,
                     CASE
@@ -238,6 +253,22 @@ public struct DBService: DBServiceProtocol {
                   AND e.reading_hiragana NOT LIKE ? || '%'
                   AND LENGTH(e.headword) <= ?
                 ORDER BY
+                    -- Rare kanji penalty first (same as main search)
+                    CASE
+                        WHEN INSTR(e.headword, '韜') > 0 OR INSTR(e.headword, '晦') > 0
+                             OR INSTR(e.headword, '躊') > 0 OR INSTR(e.headword, '躇') > 0
+                             OR INSTR(e.headword, '憚') > 0 OR INSTR(e.headword, '瞠') > 0
+                             OR INSTR(e.headword, '嘯') > 0 OR INSTR(e.headword, '囁') > 0
+                             OR INSTR(e.headword, '竦') > 0 OR INSTR(e.headword, '戮') > 0
+                             OR INSTR(e.headword, '慄') > 0 OR INSTR(e.headword, '謗') > 0
+                             OR INSTR(e.headword, '詭') > 0 OR INSTR(e.headword, '諌') > 0
+                             OR INSTR(e.headword, '蘊') > 0 OR INSTR(e.headword, '揶') > 0
+                             OR INSTR(e.headword, '揄') > 0 OR INSTR(e.headword, '逡') > 0
+                             OR INSTR(e.headword, '巡') > 0 AND INSTR(e.headword, '逡巡') > 0
+                             OR INSTR(e.headword, '輿') > 0
+                        THEN 1
+                        ELSE 0
+                    END ASC,
                     CASE WHEN e.jlpt_level IS NOT NULL THEN 0 ELSE 1 END ASC,
                     CASE
                         WHEN e.jlpt_level = 'N5' THEN 0
@@ -452,8 +483,12 @@ public struct DBService: DBServiceProtocol {
             // Build core headwords filter - automatically detect from query
             var coreHeadwordsArray: [String] = []
 
+            // Detect query type for verb phrase penalty
+            let isVerbQuery = lowerQuery.hasPrefix("to ")
+            let isNounQuery = !isVerbQuery
+
             // Extract base verb from query (e.g., "to wake up" → "wake up", "to go out" → "go out")
-            if lowerQuery.hasPrefix("to ") {
+            if isVerbQuery {
                 let afterTo = String(lowerQuery.dropFirst(3)) // Remove "to "
 
                 // Try full phrase first (e.g., "go out", "wake up")
@@ -543,6 +578,14 @@ public struct DBService: DBServiceProtocol {
                             }.joined(separator: "\n                            "))
                             ELSE 1
                         END AS semantic_boost,
+                        -- Verb phrase penalty: ONLY for noun queries, penalize "to verb" definitions
+                        -- Examples: "schedule" → penalize "to fall behind schedule"
+                        --           "to test" → NO penalty (query is verb-like)
+                        -- Use LTRIM to handle leading spaces
+                        CASE
+                            WHEN ? = 1 AND LOWER(LTRIM(ws.definition_english)) LIKE 'to %' THEN 1
+                            ELSE 0
+                        END AS verb_phrase_penalty,
                         -- Parenthetical penalty: prioritize primary definitions over contextual usage
                         -- Priority 0: Query word appears as PRIMARY definition (not in parentheses or "as a/an" context)
                         -- Priority 1: Query word appears in CONTEXTUAL usage (inside parentheses or "as a/an" usage)
@@ -725,6 +768,7 @@ public struct DBService: DBServiceProtocol {
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.phrasal_penalty) AS phrasal_penalty,
                         MIN(c.semantic_boost) AS semantic_boost,
+                        MIN(c.verb_phrase_penalty) AS verb_phrase_penalty,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
@@ -743,27 +787,36 @@ public struct DBService: DBServiceProtocol {
                         WHEN \(coreHeadwordsArray.isEmpty ? "0" : "e.headword IN (\(coreHeadwordsArray.map { _ in "?" }.joined(separator: ",")))") THEN 0
                         ELSE 1
                     END,
-                    -- Priority 2: JLPT existence (common words with JLPT > obscure words without JLPT)
-                    -- e.g., 売れる (N3) before 鬻ぐ (no JLPT - archaic)
-                    CASE
-                        WHEN e.jlpt_level IS NOT NULL THEN 0
-                        ELSE 1
-                    END,
-                    -- Priority 3: Phrasal penalty (NEW - for basic English words)
+                    -- Priority 2: Phrasal penalty (NEW - for basic English words)
                     -- Demote phrasal expressions like "after all", "if only", "so that"
                     -- This ensures core words with direct translations rank higher
                     -- e.g., 全部 (all) before 更に (after all)
                     agg.phrasal_penalty,
-                    -- Priority 4: Semantic boost (NEW - for contextual hints)
+                    -- Priority 3: Semantic boost (NEW - for contextual hints)
                     -- Boost entries with matching semantic markers from user hints
                     -- e.g., "treat" + hint "请客" → boost "(esp. food and drink)"
                     -- 0 = boosted (contains semantic keywords), 1 = normal
                     agg.semantic_boost,
-                    -- Priority 5: Match quality (word position in definition)
+                    -- Priority 4: Verb phrase penalty (NEW - for noun-like queries)
+                    -- CRITICAL: Must come BEFORE JLPT existence
+                    -- Demote "to verb" definitions when user searches for nouns
+                    -- e.g., for "schedule": 予定 (schedule; plan) before 押す (to fall behind schedule)
+                    -- Only activates when isNounQuery=1 (query doesn't start with "to ")
+                    agg.verb_phrase_penalty,
+                    -- Priority 5: JLPT existence (AFTER verb_phrase_penalty)
+                    -- Common words with JLPT > obscure words without JLPT
+                    -- e.g., 売れる (N3) before 鬻ぐ (no JLPT - archaic)
+                    -- CRITICAL: Moved AFTER verb_phrase_penalty so nouns like 日程 (no JLPT)
+                    -- still rank before verb phrases like 押す (N5, "to fall behind schedule")
+                    CASE
+                        WHEN e.jlpt_level IS NOT NULL THEN 0
+                        ELSE 1
+                    END,
+                    -- Priority 6: Match quality (word position in definition)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- e.g., for "all": 全部 (def="all; entire") before 更に (def contains "after all")
                     agg.match_priority,
-                    -- Priority 6: JLPT level priority (N5 > N4 > N3 > N2 > N1)
+                    -- Priority 7: JLPT level priority (N5 > N4 > N3 > N2 > N1)
                     -- CRITICAL: Moved BEFORE conjunction_priority for basic English words
                     -- Prioritizes common vocabulary over grammatical conjunctions
                     -- e.g., 全部 (N5: all) before 更に (N3: furthermore; after all)
@@ -775,23 +828,23 @@ public struct DBService: DBServiceProtocol {
                         WHEN e.jlpt_level = 'N1' THEN 4
                         ELSE 5
                     END,
-                    -- Priority 7: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 8: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 8: Parenthetical penalty
+                    -- Priority 9: Parenthetical penalty
                     -- Ensure primary definitions (e.g., "test") rank higher than contextual usage (e.g., "question (e.g. on a test)")
                     -- CRITICAL: Must come BEFORE first_matching_sense to distinguish:
                     --   - 試験 (sense #1: "examination; exam; test") vs
                     --   - 問題 (sense #1: "question (e.g. on a test)")
                     agg.parenthetical_priority,
-                    -- Priority 9: Conjunction priority (logical conjunctions before conversational transitions)
+                    -- Priority 10: Conjunction priority (logical conjunctions before conversational transitions)
                     -- For queries like "so", "but", "however", "therefore"
                     -- Prioritize logical conjunctions (だから、それで "therefore") over conversational transitions (じゃあ、では "well then")
                     agg.conjunction_priority,
-                    -- Priority 10: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 11: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     -- CRITICAL: This must come BEFORE main verb boost to ensure primary meanings rank higher
                     -- e.g., 試験 (sense #1: "test") before 一番 (sense #4: "as a test")
                     agg.first_matching_sense,
-                    -- Priority 11: Main verb boost (基础动词优先)
+                    -- Priority 12: Main verb boost (基础动词优先)
                     -- N5 SHORT words (≤3 chars) appear before their derivatives
                     -- e.g., 聞く (2 chars) before 聞き入る (4 chars), 食べる (3 chars) before 食べ歩く (4 chars)
                     -- Note: Using N5 only since frequency data is not yet populated (all entries have freq=201)
@@ -843,6 +896,8 @@ public struct DBService: DBServiceProtocol {
                 ]
                 // Add semantic keywords for semantic_boost (dynamic count based on keywords)
                 arguments.append(contentsOf: semanticKeywords.map { $0 as DatabaseValueConvertible })
+                // verb_phrase_penalty (1 param: isNounQuery flag)
+                arguments.append(isNounQuery ? 1 : 0)
                 // parenthetical_priority (16 params: 4 for "as a/an" + 12 for parentheses)
                 arguments.append(contentsOf: [
                     lowerQuery,                    // line 404: LIKE '%as a ' || ? || '%'
@@ -985,6 +1040,12 @@ public struct DBService: DBServiceProtocol {
                             }.joined(separator: "\n                            "))
                             ELSE 1
                         END AS semantic_boost,
+                        -- Verb phrase penalty: Demote "to verb" definitions for noun-like queries
+                        -- Only activates when isNounQuery=1 (query doesn't start with "to ")
+                        CASE
+                            WHEN ? = 1 AND LOWER(LTRIM(ws.definition_english)) LIKE 'to %' THEN 1
+                            ELSE 0
+                        END AS verb_phrase_penalty,
                         -- Part-of-speech weight
                         CASE
                             WHEN ws.part_of_speech LIKE '%verb%' THEN 0
@@ -1025,6 +1086,7 @@ public struct DBService: DBServiceProtocol {
                         MIN(c.match_priority) AS match_priority,
                         MIN(c.parenthetical_priority) AS parenthetical_priority,
                         MIN(c.semantic_boost) AS semantic_boost,
+                        MIN(c.verb_phrase_penalty) AS verb_phrase_penalty,
                         MIN(c.pos_weight) AS pos_weight,
                         MIN(c.conjunction_priority) AS conjunction_priority,
                         MIN(c.semantic_priority) AS semantic_priority,
@@ -1045,22 +1107,27 @@ public struct DBService: DBServiceProtocol {
                     -- Boost entries with matching semantic markers from user hints
                     -- 0 = boosted (contains semantic keywords), 1 = normal
                     agg.semantic_boost,
-                    -- Priority 3: Semantic category (clothes > accessories > shoes/hat > belt > sword)
+                    -- Priority 3: Verb phrase penalty (NEW - for noun-like queries)
+                    -- Demote "to verb" definitions when user searches for nouns
+                    -- e.g., for "schedule": 予定 (schedule; plan) before 押す (to fall behind schedule)
+                    -- Only activates when isNounQuery=1 (query doesn't start with "to ")
+                    agg.verb_phrase_penalty,
+                    -- Priority 4: Semantic category (clothes > accessories > shoes/hat > belt > sword)
                     agg.semantic_priority,
-                    -- Priority 4: First matching sense (sense_order: 1st sense > 2nd sense > ...)
+                    -- Priority 5: First matching sense (sense_order: 1st sense > 2nd sense > ...)
                     agg.first_matching_sense,
-                    -- Priority 5: Conjunction priority (conjunctions first for linking words)
+                    -- Priority 6: Conjunction priority (conjunctions first for linking words)
                     agg.conjunction_priority,
-                    -- Priority 6: Part-of-speech
+                    -- Priority 7: Part-of-speech
                     agg.pos_weight,
-                    -- Priority 7: Parenthetical semantic match
+                    -- Priority 8: Parenthetical semantic match
                     agg.parenthetical_priority,
-                    -- Priority 8: Common words
+                    -- Priority 9: Common words
                     CASE
                         WHEN e.frequency_rank IS NOT NULL AND e.frequency_rank <= 5000 THEN 0
                         ELSE 1
                     END,
-                    -- Priority 9: DEMOTE pure katakana
+                    -- Priority 10: DEMOTE pure katakana
                     CASE
                         WHEN ? = 1
                              AND e.headword != ''
@@ -1069,9 +1136,9 @@ public struct DBService: DBServiceProtocol {
                         THEN 1
                         ELSE 0
                     END,
-                    -- Priority 10: Match quality
+                    -- Priority 11: Match quality
                     agg.match_priority,
-                    -- Priority 11: Frequency
+                    -- Priority 12: Frequency
                     COALESCE(e.frequency_rank, 999999),
                     -- Tie-breakers
                     e.created_at,
@@ -1098,6 +1165,8 @@ public struct DBService: DBServiceProtocol {
                 ]
                 // Add semantic keywords for semantic_boost (dynamic count based on keywords)
                 arguments.append(contentsOf: semanticKeywords.map { $0 as DatabaseValueConvertible })
+                // verb_phrase_penalty (1 param: isNounQuery flag)
+                arguments.append(isNounQuery ? 1 : 0)
                 arguments.append(lowerQuery)  // WHERE clause
                 // Add core headwords if provided
                 if !coreHeadwordsArray.isEmpty {

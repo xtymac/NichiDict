@@ -22,6 +22,7 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - 2025-11: Added JMDict variant_type system for kanji variant normalization
 - 2025-11: Added phrasal penalty system for English reverse search (prioritize JLPT core vocab)
 - 2025-11-22: Added rare kanji penalty for Japanese search (downrank academic/literary compounds)
+- 2025-11-23: Added verb phrase penalty for English reverse search (prioritize noun definitions for noun-like queries)
 
 <!-- MANUAL ADDITIONS START -->
 ## English Reverse Search (2025-11)
@@ -48,18 +49,41 @@ Swift 6.0 with strict concurrency checking enabled: Follow standard conventions
 - Priority order: phrasal_penalty → semantic_boost → match_priority → JLPT level
 - Ensures learners see contextually relevant translations first (ごちそう before 苛める for "treat (food)")
 
+**Verb phrase penalty system** (2025-11-23): For noun-like English queries, prioritize noun definitions over verb phrase definitions:
+- Search "schedule" → 予定 (schedule; plan), 日程 (schedule; agenda) rank before 押す (to fall behind schedule)
+- Search "test" → 試験 (examination; test) ranks before 試す (to test; to try)
+- Only activates for non-verb queries (queries that don't start with "to ")
+
+**Implementation** ([DBService.swift:585](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L585), [DBService.swift:1046](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L1046)):
+- Added `verb_phrase_penalty` field to detect "to verb" definitions (LIKE 'to %')
+- Query type detection: `isVerbQuery = lowerQuery.hasPrefix("to ")`, `isNounQuery = !isVerbQuery`
+- **CRITICAL**: verb_phrase_penalty must come BEFORE JLPT existence in ORDER BY
+  - Example: 押す (N5, "to fall behind schedule") would beat 日程 (no JLPT, "schedule; agenda") if JLPT came first
+  - With correct ordering: ALL noun definitions (regardless of JLPT) rank before ALL verb phrase definitions
+- Priority order: phrasal_penalty → semantic_boost → **verb_phrase_penalty** → JLPT existence → match_priority → JLPT level
+- Only penalizes when isNounQuery=1, so "to test" queries still work correctly (押す won't be penalized for "to fall behind")
+- Uses LTRIM() to handle leading spaces in definitions before checking 'to %' pattern
+- Ensures learners searching for nouns see noun results first, not verb phrases containing the noun
+
 ## Japanese Search Ranking (2025-11-22)
 
-**Rare kanji penalty system**: For Japanese kana searches, downrank academic/literary compounds with uncommon kanji:
+**Rare kanji penalty system**: For Japanese kana searches, downrank academic/literary/archaic compounds with uncommon kanji:
 - Search "じこ" → 事故 (accident, N4), 自己 (self, N3) rank before 自己韜晦 (concealing one's talents)
-- Penalized kanji: 韜晦躊躇憚瞠嘯囁竦戮慄謗詭諌蘊揶揄逡巡 and others
+- Search "よてい" → 予定 (schedule, N4) ranks before 輿丁 (palanquin bearer, archaic)
+- Penalized kanji: 韜晦躊躇憚瞠嘯囁竦戮慄謗詭諌蘊揶揄逡巡輿 and others
 - These characters are outside 常用漢字 (jōyō kanji) and unfamiliar to ~90% of native speakers
+- Archaic kanji like 輿 (palanquin/carriage) appear in historical terms but not modern usage
 
-**Implementation** ([DBService.swift:141](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L141)):
-- Added rare kanji penalty check using `INSTR()` for specific uncommon characters
-- Ranking priority: match_priority → compound_priority → JLPT level → katakana penalty → **rare kanji penalty** → frequency_rank → length
-- Ensures learners see common vocabulary before specialized literary/classical terms
-- Targeted at academic compounds that appear in dictionaries but not in everyday usage
+**Implementation** ([DBService.swift:117](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L117), [DBService.swift:195](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L195), [DBService.swift:256](Modules/CoreKit/Sources/CoreKit/DictionarySearch/Services/DBService.swift#L256)):
+- Added rare kanji penalty check using `INSTR()` for specific uncommon characters in all search paths
+- **Rare kanji penalty is now the HIGHEST priority** (above match_priority) to ensure archaic words always rank last:
+  - Main FTS search (line 117-133)
+  - Variant search for pure kana queries (line 195-210)
+  - Contains search for partial matches (line 256-271)
+- Ranking priority: **rare_kanji_penalty** → match_priority → compound_priority → JLPT level → katakana penalty → frequency_rank → length
+- Ensures modern compound words (予定外, 予定納税) rank before archaic exact matches (輿丁)
+- Targeted at academic compounds and historical words that appear in dictionaries but not in modern usage
+- Example: "よてい" shows 予定 (N4), 予定外, 予定納税... before 輿丁 (archaic, rank 21)
 
 ## Kana/Kanji Display Rules (2025-11-22)
 
